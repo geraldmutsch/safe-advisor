@@ -79,7 +79,16 @@ def login():
         return jsonify({'success': True})
 
     except Exception as e:
+        import traceback
         msg = str(e)
+        print(f'[BMW Login Error] {type(e).__name__}: {msg}')
+        traceback.print_exc()
+        # Try to print response body if available
+        if hasattr(e, 'response'):
+            try:
+                print(f'[BMW Response] Status: {e.response.status_code}, Body: {e.response.text[:500]}')
+            except Exception:
+                pass
         if 'locked' in msg.lower() or 'blocked' in msg.lower():
             return jsonify({'error': 'IP/Konto vorübergehend gesperrt. Bitte 30–60 Minuten warten und erneut versuchen. (Zu viele fehlgeschlagene Login-Versuche)'}), 429
         if any(k in msg.lower() for k in ('credential', '401', 'password', 'login', 'invalid')):
