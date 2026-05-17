@@ -35,7 +35,8 @@ def _pkce():
 def _headers(access_token):
     return {
         'Authorization': f'Bearer {access_token}',
-        'Accept': 'application/json',
+        'Accept':        'application/json',
+        'x-version':     'v1',
     }
 
 def _get_store():
@@ -223,38 +224,29 @@ def basic_data(vin):
 
 @app.route('/api/state/<vin>')
 def vehicle_state(vin):
-    """Build state from CarData endpoints. Battery SoC via chargeHistory latest entry."""
     err = _require_auth()
     if err: return err
     store = _get_store()
     headers = _headers(store['access_token'])
     state = {}
 
-    # Basic data
+    # Basic data (mileage, model info)
     try:
         r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/basicData',
                       headers=headers, timeout=15)
         if r.is_success:
             bd = r.json()
-            state['currentMileage'] = bd.get('mileage') or bd.get('odometer')
+            state['currentMileage'] = bd.get('mileage') or bd.get('currentMileage') or bd.get('odometer')
     except Exception:
         pass
 
-    # Charge history → derive latest SoC and last charge
+    # Telematics data → SoC, range, location, doors
     try:
-        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargeHistory',
+        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/telematicData',
                       headers=headers, timeout=15)
         if r.is_success:
-            history = r.json()
-            sessions = history if isinstance(history, list) else history.get('chargeHistory', [])
-            if sessions:
-                latest = sessions[-1]
-                soc = latest.get('socAfterCharging') or latest.get('stateOfCharge')
-                state['electricChargingState'] = {
-                    'chargingLevelPercent': soc,
-                    'chargingStatus': 'STANDBY',
-                    'isChargerConnected': False,
-                }
+            td = r.json()
+            state.update(td)
     except Exception:
         pass
 
@@ -274,31 +266,39 @@ def charging(vin):
     err = _require_auth()
     if err: return err
     store = _get_store()
+    # Try telematicData first, fall back to chargeHistory
+    try:
+        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/telematicData',
+                      headers=_headers(store['access_token']), timeout=15)
+        if r.is_success:
+            td = r.json()
+            elec = td.get('electricChargingState') or td.get('chargingState') or {}
+            return jsonify({'chargingState': elec})
+    except Exception:
+        pass
     try:
         r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargeHistory',
                       headers=_headers(store['access_token']), timeout=15)
-        r.raise_for_status()
-        history = r.json()
-        sessions = history if isinstance(history, list) else history.get('chargeHistory', [])
-        latest = sessions[-1] if sessions else {}
-        return jsonify({
-            'chargingState': {
-                'chargingLevelPercent':  latest.get('socAfterCharging') or latest.get('stateOfCharge'),
-                'isChargerConnected':    False,
-                'chargingStatus':        'STANDBY',
-                'chargingTarget':        latest.get('targetSoc'),
-                'remainingChargingMinutes': None,
-            }
-        })
+        if r.is_success:
+            history = r.json()
+            sessions = history if isinstance(history, list) else history.get('chargeHistory', [])
+            latest = sessions[-1] if sessions else {}
+            return jsonify({
+                'chargingState': {
+                    'chargingLevelPercent': latest.get('socAfterCharging') or latest.get('stateOfCharge'),
+                    'isChargerConnected':   False,
+                    'chargingStatus':       'STANDBY',
+                    'chargingTarget':       latest.get('targetSoc'),
+                }
+            })
     except Exception as e:
-        return jsonify({'chargingState': {}, 'error': str(e)})
+        pass
+    return jsonify({'chargingState': {}})
 
 @app.route('/api/sessions')
 def sessions_route():
-    # Use first vehicle from store if we have VIN
     err = _require_auth()
     if err: return err
-    # VIN passed as query param from frontend
     vin = request.args.get('vin', '')
     if not vin:
         return jsonify([])
