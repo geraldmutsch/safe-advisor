@@ -27,33 +27,12 @@
         <h1>BMW <span>Dashboard</span></h1>
       </div>
     </div>
-    <p class="subtitle">Melden Sie sich mit Ihrem BMW ConnectedDrive-Konto an.</p>
+    <p class="subtitle">Demo-Modus — BMW hat die API für Drittanbieter gesperrt.</p>
+    <div class="demo-notice">
+      ⚠️ BMW blockiert seit 2025 alle Drittanbieter-API-Zugriffe. Das Dashboard zeigt realistische Beispieldaten eines BMW iX xDrive50.
+    </div>
     <form id="login-form">
-      <div class="form-group">
-        <label>E-Mail</label>
-        <input type="email" id="login-email" placeholder="name@example.com" autocomplete="email" required />
-      </div>
-      <div class="form-group">
-        <label>Passwort</label>
-        <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" required />
-      </div>
-      <div class="form-group">
-        <label>Region</label>
-        <select id="login-region">
-          <option value="eu">Europa (EU)</option>
-          <option value="us">USA</option>
-          <option value="cn">China</option>
-          <option value="row">Rest der Welt (ROW)</option>
-        </select>
-      </div>
-      <div class="captcha-box">
-        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
-          BMW verlangt eine Captcha-Bestätigung:
-        </div>
-        <div id="hcaptcha-widget"></div>
-        <input type="hidden" id="login-captcha" />
-      </div>
-      <button type="submit" class="btn-primary" id="login-btn">Anmelden</button>
+      <button type="submit" class="btn-primary" id="login-btn">Demo starten</button>
       <div class="error-msg" id="login-error"></div>
     </form>
   </div>
@@ -71,7 +50,7 @@
         <div class="roundel-q"></div>
         <div class="roundel-q"></div>
       </div>
-      <h2>BMW Dashboard</h2>
+      <h2>BMW Dashboard <span style="font-size:11px;background:rgba(243,156,18,0.2);color:#f39c12;border:1px solid rgba(243,156,18,0.3);padding:2px 8px;border-radius:10px;margin-left:6px;font-weight:500">Demo</span></h2>
     </div>
     <div class="top-bar-right">
       <select id="vehicle-selector" class="vehicle-selector" style="display:none"></select>

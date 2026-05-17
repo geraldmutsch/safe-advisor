@@ -1,256 +1,178 @@
 #!/usr/bin/env python3
-"""BMW Dashboard – Backend using bimmer-connected (https://github.com/bimmerconnected/bimmer_connected)"""
+"""BMW Dashboard – Demo mode with realistic BEV data.
 
-import asyncio
+NOTE: BMW blocked all third-party API access in 2025. The bimmer_connected
+library itself warns: 'non-functional due to changes in the MyBMW API.'
+This server runs in Demo Mode with realistic sample data until BMW provides
+an official developer API or a working workaround becomes available.
+"""
+
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, request, send_from_directory, session
 
 app = Flask(__name__, static_folder='public', static_url_path='')
 app.secret_key = secrets.token_hex(32)
 
-# In-memory session store: session_id -> MyBMWAccount
-_store: dict = {}
+# ── Demo data ─────────────────────────────────────────────────────────────────
 
-REGION_MAP = {
-    'eu':  'rest_of_world',
-    'us':  'north_america',
-    'cn':  'china',
-    'row': 'rest_of_world',
-}
+DEMO_VEHICLES = [
+    {
+        'vin': 'WBY1Z210X0V123456',
+        'attributes': {
+            'model': 'BMW iX xDrive50',
+            'modelName': 'BMW iX xDrive50',
+            'driveTrain': 'BEV',
+            'year': 2024,
+        }
+    }
+]
 
-def arun(coro):
-    """Run an async coroutine from synchronous Flask handlers."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+def make_demo_state():
+    now = datetime.now(timezone.utc)
+    return {
+        'state': {
+            'currentMileage': 18742,
+            'electricChargingState': {
+                'chargingLevelPercent': 78,
+                'range': 312,
+                'chargingStatus': 'STANDBY',
+                'isChargerConnected': False,
+                'chargingTarget': 80,
+            },
+            'doorsState': {
+                'leftFront':  'CLOSED',
+                'rightFront': 'CLOSED',
+                'leftRear':   'CLOSED',
+                'rightRear':  'CLOSED',
+                'hood':       'CLOSED',
+                'trunk':      'CLOSED',
+            },
+            'windowsState': {'allClosed': True},
+            'location': {
+                'coordinates': {'latitude': 48.1351, 'longitude': 11.5820},
+                'address': {'formatted': 'Petuelring 130, 80809 München'}
+            },
+            'conditionBasedServices': [
+                {'cbsType': 'BRAKE_FLUID', 'description': 'Bremsflüssigkeit', 'state': 'OK',   'dueDate': '2026-08-01'},
+                {'cbsType': 'VEHICLE_CHECK', 'description': 'Fahrzeugcheck',  'state': 'OK',   'dueDate': '2026-03-15'},
+                {'cbsType': 'AIR_CONDITIONER', 'description': 'Klimaanlage',  'state': 'OK',   'dueDate': '2025-10-01'},
+            ],
+        }
+    }
 
-def get_account():
-    sid = session.get('sid')
-    return _store.get(sid) if sid else None
+def make_demo_charging():
+    return {
+        'chargingState': {
+            'chargingLevelPercent': 78,
+            'isChargerConnected': False,
+            'chargingStatus': 'STANDBY',
+            'chargingTarget': 80,
+            'remainingChargingMinutes': None,
+            'chargingConnectionType': 'NONE',
+            'chargingPower': None,
+        }
+    }
 
-def safe_get(fn, default=None):
-    try:
-        return fn()
-    except Exception:
-        return default
+def make_demo_lasttrip():
+    return {
+        'lastTrip': {
+            'totalDistance': 43200,       # metres → 43.2 km
+            'totalDuration': 2520,        # seconds → 42 min
+            'totalEnergyConsumption': 16.8,
+            'totalRecuperatedEnergy': 3.2,
+        }
+    }
 
-# ── Static ────────────────────────────────────────────────────────────────────
+def make_demo_alltime():
+    return {
+        'statistics': {
+            'totalDistance': 18742000,       # metres → 18 742 km
+            'totalElectricDistance': 18742000,
+            'totalEnergyCharged': 3840.5,
+            'totalRecuperatedEnergy': 620.3,
+        }
+    }
+
+def make_demo_sessions():
+    base = datetime.now(timezone.utc)
+    sessions = []
+    kwh_values = [28.4, 12.1, 44.7, 8.3, 36.2, 19.8, 52.1, 6.4, 41.3, 23.9]
+    for i, kwh in enumerate(kwh_values):
+        sessions.append({
+            'date': (base - timedelta(days=i * 3)).isoformat(),
+            'energyCharged': kwh,
+        })
+    return list(reversed(sessions))
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
 @app.route('/')
 def index():
     return send_from_directory('public', 'index.html')
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
 @app.route('/api/status')
 def status():
-    return jsonify({'authenticated': bool(get_account())})
+    return jsonify({'authenticated': session.get('demo', False)})
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    from bimmer_connected.account import MyBMWAccount
-    from bimmer_connected.api.regions import get_region_from_name
-
-    data = request.get_json() or {}
-    email         = (data.get('email') or '').strip()
-    password      = data.get('password') or ''
-    region        = REGION_MAP.get(data.get('region', 'eu'), 'rest_of_world')
-    captcha_token = data.get('captcha_token') or ''
-
-    if not email or not password:
-        return jsonify({'error': 'E-Mail und Passwort erforderlich'}), 400
-    if not captcha_token:
-        return jsonify({'error': 'Captcha-Token fehlt. Bitte Captcha auf der verlinkten Seite lösen.'}), 400
-
-    try:
-        account = MyBMWAccount(email, password, get_region_from_name(region),
-                               hcaptcha_token=captcha_token)
-        arun(account.get_vehicles())
-
-        sid = secrets.token_hex(16)
-        _store[sid] = account
-        session['sid'] = sid
-        return jsonify({'success': True})
-
-    except Exception as e:
-        import traceback
-        msg = str(e)
-        print(f'[BMW Login Error] {type(e).__name__}: {msg}')
-        traceback.print_exc()
-        # Try to print response body if available
-        if hasattr(e, 'response'):
-            try:
-                print(f'[BMW Response] Status: {e.response.status_code}, Body: {e.response.text[:500]}')
-            except Exception:
-                pass
-        if 'locked' in msg.lower() or 'blocked' in msg.lower():
-            return jsonify({'error': 'IP/Konto vorübergehend gesperrt. Bitte 30–60 Minuten warten und erneut versuchen. (Zu viele fehlgeschlagene Login-Versuche)'}), 429
-        if any(k in msg.lower() for k in ('credential', '401', 'password', 'login', 'invalid')):
-            return jsonify({'error': f'Zugangsdaten falsch: {msg}'}), 401
-        return jsonify({'error': f'Verbindungsfehler: {msg}'}), 500
+    # Demo mode: accept any credentials
+    session['demo'] = True
+    return jsonify({'success': True, 'demo': True})
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
-    sid = session.pop('sid', None)
-    if sid:
-        _store.pop(sid, None)
+    session.clear()
     return jsonify({'success': True})
 
-# ── Vehicles ──────────────────────────────────────────────────────────────────
+# ── Data endpoints ────────────────────────────────────────────────────────────
+
+def require_auth():
+    if not session.get('demo'):
+        return jsonify({'error': 'Nicht angemeldet'}), 401
+    return None
 
 @app.route('/api/vehicles')
 def vehicles():
-    account = get_account()
-    if not account:
-        return jsonify({'error': 'Nicht angemeldet'}), 401
-
-    result = []
-    for v in account.vehicles:
-        result.append({
-            'vin': v.vin,
-            'attributes': {
-                'model':     v.name,
-                'modelName': v.name,
-                'driveTrain': safe_get(lambda: v.drive_train.value, 'BEV'),
-            }
-        })
-    return jsonify(result)
+    err = require_auth()
+    if err: return err
+    return jsonify(DEMO_VEHICLES)
 
 @app.route('/api/state/<vin>')
 def vehicle_state(vin):
-    account = get_account()
-    if not account:
-        return jsonify({'error': 'Nicht angemeldet'}), 401
-
-    # Refresh vehicle data
-    try:
-        arun(account.get_vehicles())
-    except Exception:
-        pass
-
-    vehicle = next((v for v in account.vehicles if v.vin == vin), None)
-    if not vehicle:
-        return jsonify({'error': 'Fahrzeug nicht gefunden'}), 404
-
-    state = {}
-
-    # Mileage
-    mileage = safe_get(lambda: vehicle.mileage)
-    if mileage:
-        state['currentMileage'] = mileage[0]
-
-    # Battery / charging
-    fb = safe_get(lambda: vehicle.fuel_and_battery)
-    if fb:
-        elec = {
-            'chargingLevelPercent': safe_get(lambda: fb.remaining_battery_percent),
-            'chargingStatus':       safe_get(lambda: fb.charging_status.value),
-            'isChargerConnected':   safe_get(lambda: fb.is_charger_connected, False),
-            'chargingTarget':       safe_get(lambda: fb.charging_target),
-        }
-        rng = safe_get(lambda: fb.remaining_range_electric)
-        if rng:
-            elec['range'] = rng[0]
-        state['electricChargingState'] = elec
-
-    # GPS location
-    gps = safe_get(lambda: vehicle.status.gps_position)
-    if gps:
-        state['location'] = {
-            'coordinates': {'latitude': gps[0], 'longitude': gps[1]}
-        }
-
-    # Doors / lids
-    lids = safe_get(lambda: vehicle.status.lids, [])
-    if lids:
-        doors = {}
-        for lid in lids:
-            lid_id = safe_get(lambda: lid.id.value, 'unknown')
-            doors[lid_id] = 'CLOSED' if safe_get(lambda: lid.is_closed, True) else 'OPEN'
-        state['doorsState'] = doors
-
-    # Windows
-    all_windows = safe_get(lambda: vehicle.status.all_windows_closed)
-    if all_windows is not None:
-        state['windowsState'] = {'allClosed': all_windows}
-
-    # Condition Based Services
-    cbs_list = safe_get(lambda: vehicle.status.condition_based_services, [])
-    if cbs_list:
-        cbs = []
-        for s in cbs_list:
-            cbs.append({
-                'cbsType':     safe_get(lambda: s.service_type.value, ''),
-                'description': safe_get(lambda: s.service_type.value.replace('_', ' ').title(), ''),
-                'state':       safe_get(lambda: s.state.value, 'UNKNOWN'),
-                'dueDate':     safe_get(lambda: s.due_date.isoformat() if s.due_date else None),
-            })
-        state['conditionBasedServices'] = cbs
-
-    # Check control messages
-    ccm = safe_get(lambda: vehicle.status.check_control_messages, [])
-    if ccm:
-        state['checkControlMessages'] = [
-            {'description': safe_get(lambda: m.description_short, ''), 'state': 'INFO'}
-            for m in ccm
-        ]
-
-    return jsonify({'state': state})
+    err = require_auth()
+    if err: return err
+    return jsonify(make_demo_state())
 
 @app.route('/api/charging/<vin>')
 def charging(vin):
-    account = get_account()
-    if not account:
-        return jsonify({'error': 'Nicht angemeldet'}), 401
+    err = require_auth()
+    if err: return err
+    return jsonify(make_demo_charging())
 
-    vehicle = next((v for v in account.vehicles if v.vin == vin), None)
-    if not vehicle:
-        return jsonify({'error': 'Fahrzeug nicht gefunden'}), 404
-
-    fb = safe_get(lambda: vehicle.fuel_and_battery)
-    if not fb:
-        return jsonify({'chargingState': {}})
-
-    remaining_min = None
-    end_time = safe_get(lambda: fb.charging_end_time)
-    if end_time:
-        if end_time.tzinfo is None:
-            end_time = end_time.replace(tzinfo=timezone.utc)
-        diff = (end_time - datetime.now(timezone.utc)).total_seconds() / 60
-        remaining_min = max(0, int(diff))
-
-    return jsonify({
-        'chargingState': {
-            'chargingLevelPercent':    safe_get(lambda: fb.remaining_battery_percent),
-            'isChargerConnected':      safe_get(lambda: fb.is_charger_connected, False),
-            'chargingStatus':          safe_get(lambda: fb.charging_status.value),
-            'chargingTarget':          safe_get(lambda: fb.charging_target),
-            'remainingChargingMinutes': remaining_min,
-        }
-    })
-
-# These endpoints require raw API access not covered by bimmer_connected
-# They return empty data gracefully so the dashboard still renders
 @app.route('/api/lasttrip')
 def last_trip():
-    return jsonify({})
+    err = require_auth()
+    if err: return err
+    return jsonify(make_demo_lasttrip())
 
 @app.route('/api/alltime')
 def alltime():
-    return jsonify({})
+    err = require_auth()
+    if err: return err
+    return jsonify(make_demo_alltime())
 
 @app.route('/api/sessions')
 def sessions_route():
-    return jsonify([])
+    err = require_auth()
+    if err: return err
+    return jsonify(make_demo_sessions())
 
 # ── Start ─────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    print('\n  BMW Dashboard ▸  http://localhost:3001\n')
+    print('\n  BMW Dashboard (Demo-Modus) ▸  http://localhost:3001\n')
+    print('  HINWEIS: BMW hat die API für Drittanbieter gesperrt.')
+    print('  Das Dashboard läuft mit realistischen Beispieldaten.\n')
     app.run(host='0.0.0.0', port=3001, debug=False)

@@ -122,6 +122,17 @@ body {
   background: var(--surface2);
 }
 
+.demo-notice {
+  background: rgba(243, 156, 18, 0.1);
+  border: 1px solid rgba(243, 156, 18, 0.3);
+  color: #f39c12;
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 20px;
+}
+
 .captcha-box {
   background: var(--surface2);
   border: 1px solid var(--border);

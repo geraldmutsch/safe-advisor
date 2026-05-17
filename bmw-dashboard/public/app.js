@@ -104,29 +104,13 @@ $('login-form').addEventListener('submit', async (e) => {
   btn.textContent = 'Verbinde…';
 
   try {
-    const captcha = $('login-captcha').value.trim();
-    if (!captcha) {
-      errEl.textContent = 'Bitte zuerst das Captcha (Checkbox oben) bestätigen.';
-      errEl.style.display = 'block';
-      btn.disabled = false;
-      btn.textContent = 'Anmelden';
-      return;
-    }
-    await api('/api/login', {
-      method: 'POST',
-      body: JSON.stringify({
-        email: $('login-email').value.trim(),
-        password: $('login-password').value,
-        region: $('login-region').value,
-        captcha_token: captcha,
-      }),
-    });
+    await api('/api/login', { method: 'POST', body: JSON.stringify({}) });
     await initDashboard();
   } catch (err) {
     errEl.textContent = err.message;
     errEl.style.display = 'block';
     btn.disabled = false;
-    btn.textContent = 'Anmelden';
+    btn.textContent = 'Demo starten';
   }
 });
 
@@ -136,7 +120,7 @@ $('logout-btn').addEventListener('click', async () => {
   $('dashboard').style.display = 'none';
   $('login-screen').style.display = 'flex';
   $('login-btn').disabled = false;
-  $('login-btn').textContent = 'Anmelden';
+  $('login-btn').textContent = 'Demo starten';
 });
 
 $('refresh-btn').addEventListener('click', () => refreshAll());
