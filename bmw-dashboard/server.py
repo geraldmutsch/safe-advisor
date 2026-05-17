@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """BMW Dashboard – BMW CarData Official API (OAuth2 Device Code Flow)"""
 
+import hashlib
 import secrets
 import time
+from base64 import urlsafe_b64encode
 
 import httpx
 from flask import Flask, jsonify, request, send_from_directory, session
@@ -12,12 +14,21 @@ app.secret_key = secrets.token_hex(32)
 
 CARDATA_API   = 'https://api-cardata.bmwgroup.com'
 OAUTH_BASE    = 'https://customer.bmwgroup.com/gcdm/oauth'
-SCOPE         = 'cardata:api:read openid offline_access'
+SCOPE         = 'authenticate_user openid cardata:api:read cardata:streaming:read'
 
 # In-memory store: session_id -> token info
 _store: dict = {}
 # Pending device-code auth flows: device_code -> {client_id, verifier, expires, ...}
 _pending: dict = {}
+
+# ── PKCE helpers ─────────────────────────────────────────────────────────────
+
+def _pkce():
+    verifier = urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b'=').decode()
+    challenge = urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b'=').decode()
+    return verifier, challenge
 
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 
@@ -78,10 +89,14 @@ def device_code():
     if not client_id:
         return jsonify({'error': 'Bitte Client ID eingeben'}), 400
 
+    verifier, challenge = _pkce()
     try:
         r = httpx.post(f'{OAUTH_BASE}/device/code', data={
-            'client_id': client_id,
-            'scope':     SCOPE,
+            'client_id':             client_id,
+            'response_type':         'device_code',
+            'scope':                 SCOPE,
+            'code_challenge':        challenge,
+            'code_challenge_method': 'S256',
         }, timeout=15)
         r.raise_for_status()
     except httpx.HTTPStatusError as e:
@@ -93,6 +108,7 @@ def device_code():
     device_code_val = resp['device_code']
     _pending[device_code_val] = {
         'client_id': client_id,
+        'verifier':  verifier,
         'interval':  resp.get('interval', 5),
         'expires':   time.time() + resp.get('expires_in', 600),
     }
@@ -120,9 +136,10 @@ def poll_token():
 
     try:
         r = httpx.post(f'{OAUTH_BASE}/token', data={
-            'grant_type':  'urn:ietf:params:oauth:grant-type:device_code',
-            'client_id':   pending['client_id'],
-            'device_code': device_code_val,
+            'grant_type':    'urn:ietf:params:oauth:grant-type:device_code',
+            'client_id':     pending['client_id'],
+            'device_code':   device_code_val,
+            'code_verifier': pending['verifier'],
         }, timeout=15)
     except Exception as e:
         return jsonify({'error': f'Verbindungsfehler: {e}'}), 500
