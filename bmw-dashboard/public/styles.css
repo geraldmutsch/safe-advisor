@@ -167,20 +167,13 @@ body {
 
 .btn-captcha:hover { background: rgba(1, 102, 177, 0.3); }
 
-#login-captcha {
-  width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 9px 12px;
-  color: var(--text);
-  font-size: 12px;
-  font-family: monospace;
-  outline: none;
-  margin-top: 8px;
+#hcaptcha-widget {
+  min-height: 78px;
 }
 
-#login-captcha:focus { border-color: var(--bmw-blue); }
+#hcaptcha-widget iframe {
+  border-radius: 6px;
+}
 
 .btn-primary {
   width: 100%;

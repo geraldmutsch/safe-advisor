@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>BMW Dashboard</title>
+  <script src="https://js.hcaptcha.com/1/api.js?onload=onloadCallback&render=explicit" async defer></script>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="/styles.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -46,21 +47,11 @@
         </select>
       </div>
       <div class="captcha-box">
-        <div class="captcha-step">
-          <span class="captcha-num">1</span>
-          <div>
-            <div style="font-size:13px;font-weight:600;margin-bottom:4px">Captcha lösen</div>
-            <div style="font-size:12px;color:var(--muted)">BMW verlangt eine Captcha-Bestätigung.</div>
-          </div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          BMW verlangt eine Captcha-Bestätigung:
         </div>
-        <a href="https://bimmer-connected.readthedocs.io/en/stable/captcha.html" target="_blank" class="btn-captcha">
-          Captcha-Seite öffnen ↗
-        </a>
-        <div class="captcha-step" style="margin-top:10px">
-          <span class="captcha-num">2</span>
-          <div style="font-size:13px;font-weight:600">Token hier einfügen</div>
-        </div>
-        <input type="text" id="login-captcha" placeholder="hCaptcha-Token einfügen…" autocomplete="off" />
+        <div id="hcaptcha-widget"></div>
+        <input type="hidden" id="login-captcha" />
       </div>
       <button type="submit" class="btn-primary" id="login-btn">Anmelden</button>
       <div class="error-msg" id="login-error"></div>

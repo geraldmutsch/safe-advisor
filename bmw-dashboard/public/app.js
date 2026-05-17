@@ -1,5 +1,42 @@
 'use strict';
 
+// ── hCaptcha ───────────────────────────────────────────────────────────────
+// Site keys from bimmer_connected const.py
+const HCAPTCHA_KEYS = {
+  eu:  '10000000-ffff-ffff-ffff-000000000001', // test key — simple checkbox
+  row: '10000000-ffff-ffff-ffff-000000000001',
+  us:  'dc24de9a-9844-438b-b542-60067ff4dbe9',
+  cn:  '10000000-ffff-ffff-ffff-000000000001',
+};
+
+let hcaptchaWidgetId = null;
+
+function renderCaptcha(region) {
+  if (typeof hcaptcha === 'undefined') return;
+  const el = document.getElementById('hcaptcha-widget');
+  el.innerHTML = '';
+  hcaptchaWidgetId = hcaptcha.render(el, {
+    sitekey: HCAPTCHA_KEYS[region] || HCAPTCHA_KEYS.eu,
+    theme: 'dark',
+    callback: token => { document.getElementById('login-captcha').value = token; },
+    'expired-callback': () => { document.getElementById('login-captcha').value = ''; },
+  });
+}
+
+// Re-render widget when region changes
+window.addEventListener('DOMContentLoaded', () => {
+  const regionSel = document.getElementById('login-region');
+  if (regionSel) {
+    regionSel.addEventListener('change', () => renderCaptcha(regionSel.value));
+  }
+});
+
+// Called by hCaptcha JS SDK once loaded
+window.onloadCallback = () => {
+  const region = (document.getElementById('login-region') || {}).value || 'eu';
+  renderCaptcha(region);
+};
+
 // ── State ──────────────────────────────────────────────────────────────────
 const state = {
   vehicles: [],
@@ -69,7 +106,7 @@ $('login-form').addEventListener('submit', async (e) => {
   try {
     const captcha = $('login-captcha').value.trim();
     if (!captcha) {
-      errEl.textContent = 'Bitte zuerst das Captcha lösen und den Token einfügen.';
+      errEl.textContent = 'Bitte zuerst das Captcha (Checkbox oben) bestätigen.';
       errEl.style.display = 'block';
       btn.disabled = false;
       btn.textContent = 'Anmelden';
