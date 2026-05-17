@@ -21,6 +21,65 @@ _store: dict = {}
 # Pending device-code auth flows: device_code -> {client_id, verifier, expires, ...}
 _pending: dict = {}
 
+# ── Telematics key → structured state ────────────────────────────────────────
+
+def _parse_telematics(items):
+    """Convert [{name, value, ...}] list to flat {key: value} dict."""
+    if not isinstance(items, list):
+        return {}
+    return {i['name']: i.get('value') for i in items if 'name' in i}
+
+def _telematics_to_state(td):
+    state = {}
+
+    # Mileage
+    raw = td.get('vehicle.vehicle.travelledDistance')
+    if raw is not None:
+        try: state['currentMileage'] = float(raw)
+        except: pass
+
+    # Battery / charging
+    soc     = td.get('vehicle.powertrain.electric.battery.stateOfCharge')
+    rrange  = td.get('vehicle.powertrain.electric.battery.remainingRange')
+    cstatus = (td.get('vehicle.powertrain.electric.battery.charging.status') or
+               td.get('vehicle.drivetrain.electricEngine.charging.status'))
+    cpower  = td.get('vehicle.powertrain.electric.battery.charging.power')
+    if any(v is not None for v in (soc, rrange, cstatus)):
+        try:
+            state['electricChargingState'] = {
+                'chargingLevelPercent': float(soc)    if soc    is not None else None,
+                'range':                float(rrange) if rrange is not None else None,
+                'chargingStatus':       cstatus or 'STANDBY',
+                'isChargerConnected':   cstatus not in (None, 'NOT_CHARGING', 'STANDBY'),
+                'chargingPower':        float(cpower) if cpower is not None else None,
+            }
+        except: pass
+
+    # GPS
+    lat = td.get('vehicle.cabin.infotainment.navigation.currentLocation.latitude')
+    lon = td.get('vehicle.cabin.infotainment.navigation.currentLocation.longitude')
+    if lat is not None and lon is not None:
+        try:
+            state['location'] = {'latitude': float(lat), 'longitude': float(lon)}
+        except: pass
+
+    # Doors
+    door_map = {
+        'leftFront':  'vehicle.cabin.door.row1.driver.isOpen',
+        'rightFront': 'vehicle.cabin.door.row1.passenger.isOpen',
+        'leftRear':   'vehicle.cabin.door.row2.driver.isOpen',
+        'rightRear':  'vehicle.cabin.door.row2.passenger.isOpen',
+    }
+    doors = {}
+    for key, tkey in door_map.items():
+        val = td.get(tkey)
+        if val is not None:
+            doors[key] = 'OPEN' if str(val).lower() in ('true', '1', 'open') else 'CLOSED'
+    if doors:
+        state['doorsState'] = doors
+
+    return state
+
 # ── PKCE helpers ─────────────────────────────────────────────────────────────
 
 def _pkce():
@@ -240,12 +299,12 @@ def vehicle_state(vin):
     except Exception:
         pass
 
-    # Telematics data → SoC, range, location, doors
+    # Telematics data → SoC, range, location, doors (flat key-value list)
     try:
         r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/telematicData',
                       headers=headers, timeout=15)
         if r.is_success:
-            td = r.json()
+            td = _telematics_to_state(_parse_telematics(r.json()))
             state.update(td)
     except Exception:
         pass
@@ -266,7 +325,7 @@ def charging(vin):
     err = _require_auth()
     if err: return err
     store = _get_store()
-    # Try telematicData first, fall back to chargeHistory
+    # Try telematicData first, fall back to chargingHistory
     try:
         r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/telematicData',
                       headers=_headers(store['access_token']), timeout=15)
@@ -277,11 +336,11 @@ def charging(vin):
     except Exception:
         pass
     try:
-        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargeHistory',
+        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargingHistory',
                       headers=_headers(store['access_token']), timeout=15)
         if r.is_success:
             history = r.json()
-            sessions = history if isinstance(history, list) else history.get('chargeHistory', [])
+            sessions = history if isinstance(history, list) else history.get('chargingHistory', [])
             latest = sessions[-1] if sessions else {}
             return jsonify({
                 'chargingState': {
@@ -304,11 +363,11 @@ def sessions_route():
         return jsonify([])
     store = _get_store()
     try:
-        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargeHistory',
+        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargingHistory',
                       headers=_headers(store['access_token']), timeout=15)
         r.raise_for_status()
         history = r.json()
-        sessions = history if isinstance(history, list) else history.get('chargeHistory', [])
+        sessions = history if isinstance(history, list) else history.get('chargingHistory', [])
         result = []
         for s in sessions[-10:]:
             result.append({
@@ -318,6 +377,27 @@ def sessions_route():
         return jsonify(result)
     except Exception:
         return jsonify([])
+
+@app.route('/api/raw/<vin>')
+def raw_data(vin):
+    """Debug: returns raw BMW API responses for all endpoints."""
+    err = _require_auth()
+    if err: return err
+    store = _get_store()
+    h = _headers(store['access_token'])
+    out = {}
+    for name, path in [
+        ('basicData',      f'/customers/vehicles/{vin}/basicData'),
+        ('telematicData',  f'/customers/vehicles/{vin}/telematicData'),
+        ('chargingHistory',f'/customers/vehicles/{vin}/chargingHistory'),
+        ('tireData',       f'/customers/vehicles/{vin}/tireData'),
+    ]:
+        try:
+            r = httpx.get(f'{CARDATA_API}{path}', headers=h, timeout=15)
+            out[name] = {'status': r.status_code, 'body': r.json() if r.is_success else r.text[:300]}
+        except Exception as e:
+            out[name] = {'error': str(e)}
+    return jsonify(out)
 
 @app.route('/api/lasttrip')
 def last_trip():
