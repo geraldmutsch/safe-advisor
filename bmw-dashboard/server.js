@@ -24,8 +24,9 @@ const REGIONS = {
   row: { authHost: 'customer.bmwgroup.com',  apiHost: 'cocoapi.bmwgroup.com',  countryId: 'AU', languageId: 'en' }
 };
 
-// BMW ConnectedDrive OAuth2 — public PKCE client (no client_secret)
-const CLIENT_ID = '31c357a0-7a1d-4590-aa99-33b97244d048';
+// BMW ConnectedDrive OAuth2 credentials (Android app, from bimmer_connected)
+const CLIENT_ID = 'dbf0a542-ebd1-4ff0-a9a7-55172fbfce35';
+const CLIENT_SECRET = '7f359ece-b4eb-42e7-8522-be2bc5060f57';
 const REDIRECT_URI = 'com.bmw.connected://oauth';
 const SCOPE = 'openid profile email offline_access smacc vehicle_data remote_services';
 
@@ -116,8 +117,10 @@ async function authenticateBMW(email, password, region = 'eu') {
 
     if (!code && (authResp.status === 401 || authResp.data?.error)) {
       const detail = authResp.data?.error_description || authResp.data?.error || '';
+      console.error('[BMW Auth] Step 2 failed:', authResp.status, JSON.stringify(authResp.data));
       throw new Error(`Zugangsdaten falsch${detail ? ': ' + detail : ''}. Bitte mit myBMW-App-Login prüfen.`);
     }
+    console.log('[BMW Auth] Step 2 status:', authResp.status, '| Location:', authResp.headers?.location || '(none)');
   } catch (err) {
     if (err.message.includes('Zugangsdaten')) throw err;
     throw new Error(`Verbindung fehlgeschlagen: ${err.message}`);
@@ -127,7 +130,8 @@ async function authenticateBMW(email, password, region = 'eu') {
     throw new Error('Anmeldung fehlgeschlagen. Tipp: Stellen Sie sicher, dass Sie die myBMW App-Zugangsdaten (nicht ConnectedDrive Classic) verwenden.');
   }
 
-  // Step 3: Exchange code for tokens (public PKCE client — no client_secret)
+  // Step 3: Exchange code for tokens — send client credentials as Basic auth header
+  const basicAuth = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
   const tokenResp = await axios.post(
     tokenUrl,
     new URLSearchParams({
@@ -135,9 +139,14 @@ async function authenticateBMW(email, password, region = 'eu') {
       code_verifier: verifier,
       redirect_uri: REDIRECT_URI,
       grant_type: 'authorization_code',
-      client_id: CLIENT_ID,
     }).toString(),
-    { headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' } }
+    {
+      headers: {
+        ...headers,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': `Basic ${basicAuth}`,
+      }
+    }
   );
 
   if (!tokenResp.data?.access_token) throw new Error('Token-Austausch fehlgeschlagen');
@@ -180,6 +189,54 @@ function requireAuth(req, res, next) {
   if (!req.session.accessToken) return res.status(401).json({ error: 'Nicht angemeldet' });
   next();
 }
+
+// Debug endpoint: shows raw BMW auth response (no credentials stored)
+app.post('/api/debug-auth', async (req, res) => {
+  const { email, password, region } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'E-Mail und Passwort erforderlich' });
+
+  const config = REGIONS[region || 'eu'] || REGIONS.eu;
+  const { verifier, challenge } = generatePKCE();
+  const oauthState = crypto.randomBytes(16).toString('hex');
+  const authBase = `https://${config.authHost}`;
+
+  const commonParams = {
+    client_id: CLIENT_ID,
+    response_type: 'code',
+    scope: SCOPE,
+    redirect_uri: REDIRECT_URI,
+    state: oauthState,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+  };
+
+  const headers = { 'X-User-Agent': 'android(v1.7.0);bmw;1.7.0;row' };
+
+  try {
+    const initResp = await axios.get(`${authBase}/gcdm/oauth/authenticate`, {
+      params: commonParams, headers, maxRedirects: 0, validateStatus: s => s < 500,
+    });
+    const cookies = (initResp.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ');
+
+    const authResp = await axios.post(
+      `${authBase}/gcdm/oauth/authenticate`,
+      new URLSearchParams({ ...commonParams, username: email, password, grant_type: 'authorization_code' }).toString(),
+      {
+        headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded', ...(cookies ? { Cookie: cookies } : {}) },
+        maxRedirects: 0, validateStatus: s => s < 500,
+      }
+    );
+
+    res.json({
+      step2_status: authResp.status,
+      step2_location: authResp.headers?.location || null,
+      step2_body: authResp.data,
+      cookies_received: !!cookies,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Retry with token refresh on 401
 async function apiWithRefresh(req, res, endpoint) {
