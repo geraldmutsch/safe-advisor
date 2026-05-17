@@ -23,11 +23,19 @@ _pending: dict = {}
 
 # ── Telematics key → structured state ────────────────────────────────────────
 
-def _parse_telematics(items):
-    """Convert [{name, value, ...}] list to flat {key: value} dict."""
-    if not isinstance(items, list):
-        return {}
-    return {i['name']: i.get('value') for i in items if 'name' in i}
+def _parse_telematics(body):
+    """Convert telematicData response to flat {key: value} dict.
+    Handles both dict format {"telematicData":{"key":{"value":...}}}
+    and list format [{"name":"key","value":...}].
+    """
+    if isinstance(body, dict):
+        data = body.get('telematicData', body)
+        if isinstance(data, dict):
+            return {k: v.get('value') if isinstance(v, dict) else v
+                    for k, v in data.items()}
+    if isinstance(body, list):
+        return {i['name']: i.get('value') for i in body if 'name' in i}
+    return {}
 
 def _telematics_to_state(td):
     state = {}
@@ -128,6 +136,46 @@ def _refresh(store_entry):
     store_entry['expires_at']    = time.time() + data.get('expires_in', 3600)
     if 'refresh_token' in data:
         store_entry['refresh_token'] = data['refresh_token']
+
+# Telematics keys we subscribe to (max 10 per container)
+_DESCRIPTORS = [
+    'vehicle.powertrain.electric.battery.stateOfCharge',
+    'vehicle.powertrain.electric.battery.remainingRange',
+    'vehicle.powertrain.electric.battery.charging.status',
+    'vehicle.powertrain.electric.battery.charging.power',
+    'vehicle.cabin.infotainment.navigation.currentLocation.latitude',
+    'vehicle.cabin.infotainment.navigation.currentLocation.longitude',
+    'vehicle.vehicle.travelledDistance',
+    'vehicle.cabin.door.row1.driver.isOpen',
+    'vehicle.cabin.door.row1.passenger.isOpen',
+    'vehicle.cabin.door.row2.driver.isOpen',
+]
+
+def _ensure_container(store_entry):
+    """Create a telematics container once and cache its ID in the store."""
+    if store_entry.get('container_id'):
+        return store_entry['container_id']
+    h = {**_headers(store_entry['access_token']), 'Content-Type': 'application/json'}
+    r = httpx.post(f'{CARDATA_API}/customers/containers',
+                   headers=h,
+                   json={'technicalDescriptors': _DESCRIPTORS},
+                   timeout=15)
+    if r.is_success:
+        cid = r.json().get('containerId') or r.json().get('id')
+        store_entry['container_id'] = cid
+        return cid
+    # If container already exists, try to fetch existing ones
+    if r.status_code in (409, 400):
+        r2 = httpx.get(f'{CARDATA_API}/customers/containers',
+                       headers=_headers(store_entry['access_token']), timeout=15)
+        if r2.is_success:
+            containers = r2.json()
+            items = containers if isinstance(containers, list) else containers.get('containers', [])
+            if items:
+                cid = items[0].get('containerId') or items[0].get('id')
+                store_entry['container_id'] = cid
+                return cid
+    return None
 
 # ── Static ────────────────────────────────────────────────────────────────────
 
@@ -299,10 +347,12 @@ def vehicle_state(vin):
     except Exception:
         pass
 
-    # Telematics data → SoC, range, location, doors (flat key-value list)
+    # Telematics data → SoC, range, location, doors
     try:
+        container_id = _ensure_container(store)
+        params = {'containerId': container_id} if container_id else {}
         r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/telematicData',
-                      headers=headers, timeout=15)
+                      headers=headers, params=params, timeout=15)
         if r.is_success:
             td = _telematics_to_state(_parse_telematics(r.json()))
             state.update(td)
@@ -336,12 +386,15 @@ def charging(vin):
     except Exception:
         pass
     try:
+        now   = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 365*86400))
         r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargingHistory',
-                      headers=_headers(store['access_token']), timeout=15)
+                      headers=_headers(store['access_token']),
+                      params={'from': since, 'to': now}, timeout=15)
         if r.is_success:
-            history = r.json()
+            history  = r.json()
             sessions = history if isinstance(history, list) else history.get('chargingHistory', [])
-            latest = sessions[-1] if sessions else {}
+            latest   = sessions[-1] if sessions else {}
             return jsonify({
                 'chargingState': {
                     'chargingLevelPercent': latest.get('socAfterCharging') or latest.get('stateOfCharge'),
@@ -350,7 +403,7 @@ def charging(vin):
                     'chargingTarget':       latest.get('targetSoc'),
                 }
             })
-    except Exception as e:
+    except Exception:
         pass
     return jsonify({'chargingState': {}})
 
@@ -363,12 +416,15 @@ def sessions_route():
         return jsonify([])
     store = _get_store()
     try:
+        now   = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 365*86400))
         r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargingHistory',
-                      headers=_headers(store['access_token']), timeout=15)
+                      headers=_headers(store['access_token']),
+                      params={'from': since, 'to': now}, timeout=15)
         r.raise_for_status()
-        history = r.json()
+        history  = r.json()
         sessions = history if isinstance(history, list) else history.get('chargingHistory', [])
-        result = []
+        result   = []
         for s in sessions[-10:]:
             result.append({
                 'date':          s.get('startTime') or s.get('timestamp'),
@@ -384,17 +440,26 @@ def raw_data(vin):
     err = _require_auth()
     if err: return err
     store = _get_store()
-    h = _headers(store['access_token'])
-    out = {}
-    for name, path in [
-        ('basicData',      f'/customers/vehicles/{vin}/basicData'),
-        ('telematicData',  f'/customers/vehicles/{vin}/telematicData'),
-        ('chargingHistory',f'/customers/vehicles/{vin}/chargingHistory'),
-        ('tireData',       f'/customers/vehicles/{vin}/tireData'),
+    h     = _headers(store['access_token'])
+    now   = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 365*86400))
+    out   = {}
+
+    # Container
+    try:
+        cid = _ensure_container(store)
+        out['container_id'] = cid
+    except Exception as e:
+        out['container_id'] = f'error: {e}'
+
+    for name, path, params in [
+        ('basicData',       f'/customers/vehicles/{vin}/basicData',       {}),
+        ('telematicData',   f'/customers/vehicles/{vin}/telematicData',    {'containerId': store.get('container_id')}),
+        ('chargingHistory', f'/customers/vehicles/{vin}/chargingHistory',  {'from': since, 'to': now}),
     ]:
         try:
-            r = httpx.get(f'{CARDATA_API}{path}', headers=h, timeout=15)
-            out[name] = {'status': r.status_code, 'body': r.json() if r.is_success else r.text[:300]}
+            r = httpx.get(f'{CARDATA_API}{path}', headers=h, params=params, timeout=15)
+            out[name] = {'status': r.status_code, 'body': r.json() if r.is_success else r.text[:400]}
         except Exception as e:
             out[name] = {'error': str(e)}
     return jsonify(out)
