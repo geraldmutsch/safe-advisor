@@ -1,2 +1,2 @@
-bimmer-connected>=0.14.0
+bimmer-connected>=0.17.4
 flask>=3.0.0
