@@ -144,20 +144,24 @@ def poll_token():
     except Exception as e:
         return jsonify({'error': f'Verbindungsfehler: {e}'}), 500
 
-    if r.status_code == 400:
-        err = r.json().get('error', '')
-        if err == 'authorization_pending':
-            return jsonify({'status': 'pending'}), 202
-        if err == 'slow_down':
-            return jsonify({'status': 'slow_down'}), 202
-        return jsonify({'error': r.json().get('error_description', err)}), 400
-
+    # Parse body regardless of HTTP status — BMW may use non-400 for pending states
     try:
-        r.raise_for_status()
+        body = r.json()
     except Exception:
-        return jsonify({'error': r.text[:200]}), 400
+        body = {}
 
-    token_data = r.json()
+    err_code = body.get('error', '')
+    if err_code == 'authorization_pending':
+        return jsonify({'status': 'pending'}), 202
+    if err_code == 'slow_down':
+        return jsonify({'status': 'slow_down'}), 202
+    if err_code:
+        return jsonify({'error': body.get('error_description', err_code)}), 400
+
+    if not r.is_success:
+        return jsonify({'error': r.text[:300]}), 400
+
+    token_data = body
     sid = secrets.token_hex(16)
     _store[sid] = {
         'client_id':     pending['client_id'],
