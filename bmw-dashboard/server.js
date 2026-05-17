@@ -36,64 +36,99 @@ function generatePKCE() {
   return { verifier, challenge };
 }
 
+function extractCode(location) {
+  if (!location) return null;
+  try {
+    const url = new URL(location.replace('com.bmw.connected://oauth', 'https://x/oauth'));
+    return url.searchParams.get('code') || null;
+  } catch {
+    const m = location.match(/[?&]code=([^&]+)/);
+    return m ? m[1] : null;
+  }
+}
+
 async function authenticateBMW(email, password, region = 'eu') {
   const config = REGIONS[region] || REGIONS.eu;
   const { verifier, challenge } = generatePKCE();
-  const state = crypto.randomBytes(16).toString('hex');
+  const oauthState = crypto.randomBytes(16).toString('hex');
+  const nonce = crypto.randomBytes(16).toString('hex');
 
-  const authUrl = `https://${config.authHost}/gcdm/oauth/authenticate`;
-  const tokenUrl = `https://${config.authHost}/gcdm/oauth/token`;
+  const authBase = `https://${config.authHost}`;
+  const tokenUrl = `${authBase}/gcdm/oauth/token`;
 
-  // Step 1: POST credentials to get authorization code
+  const commonParams = {
+    client_id: CLIENT_ID,
+    response_type: 'code',
+    scope: SCOPE,
+    redirect_uri: REDIRECT_URI,
+    state: oauthState,
+    nonce,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+  };
+
+  const headers = {
+    'X-User-Agent': 'android(v1.7.0);bmw;1.7.0;row',
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 12; sdk_gphone64_arm64)',
+  };
+
+  // Step 1: GET login page to obtain session cookies
+  let cookies = '';
+  try {
+    const initResp = await axios.get(`${authBase}/gcdm/oauth/authenticate`, {
+      params: commonParams,
+      headers,
+      maxRedirects: 0,
+      validateStatus: s => s < 500,
+    });
+    const setCookie = initResp.headers['set-cookie'];
+    if (setCookie) cookies = setCookie.map(c => c.split(';')[0]).join('; ');
+  } catch (err) {
+    throw new Error(`BMW nicht erreichbar: ${err.message}`);
+  }
+
+  // Step 2: POST credentials
   let code;
   try {
     const authResp = await axios.post(
-      authUrl,
-      new URLSearchParams({
-        client_id: CLIENT_ID,
-        response_type: 'code',
-        scope: SCOPE,
-        redirect_uri: REDIRECT_URI,
-        state,
-        code_challenge: challenge,
-        code_challenge_method: 'S256',
-        username: email,
-        password: password,
-        grant_type: 'authorization_code'
-      }).toString(),
+      `${authBase}/gcdm/oauth/authenticate`,
+      new URLSearchParams({ ...commonParams, username: email, password, grant_type: 'authorization_code' }).toString(),
       {
         headers: {
+          ...headers,
           'Content-Type': 'application/x-www-form-urlencoded',
-          'X-User-Agent': 'android(v1.7.0);bmw;1.7.0;row',
-          'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36'
+          ...(cookies ? { Cookie: cookies } : {}),
         },
-        maxRedirects: 5,
-        validateStatus: s => s < 500
+        maxRedirects: 0,
+        validateStatus: s => s < 500,
       }
     );
 
-    // Extract code from redirect Location header or response body
-    const location = authResp.headers?.location || authResp.request?.res?.responseUrl || '';
-    if (location) {
-      try {
-        const u = new URL(location.startsWith('com.bmw') ? location.replace('com.bmw.connected://', 'https://placeholder/') : location);
-        code = u.searchParams.get('code');
-      } catch {}
+    // Code may appear in Location header (redirect) or response body
+    code = extractCode(authResp.headers?.location)
+        || extractCode(authResp.data?.redirect_to)
+        || authResp.data?.code
+        || null;
+
+    // If redirect was followed, try final URL
+    if (!code && authResp.request?.res?.responseUrl) {
+      code = extractCode(authResp.request.res.responseUrl);
     }
-    if (!code && authResp.data?.code) code = authResp.data.code;
-    if (!code && authResp.data?.redirect_to) {
-      const u = new URL(authResp.data.redirect_to.replace('com.bmw.connected://', 'https://placeholder/'));
-      code = u.searchParams.get('code');
+
+    if (!code && (authResp.status === 401 || authResp.data?.error)) {
+      const detail = authResp.data?.error_description || authResp.data?.error || '';
+      throw new Error(`Zugangsdaten falsch${detail ? ': ' + detail : ''}. Bitte mit myBMW-App-Login prüfen.`);
     }
   } catch (err) {
-    throw new Error(`Verbindung zu BMW fehlgeschlagen: ${err.message}`);
+    if (err.message.includes('Zugangsdaten')) throw err;
+    throw new Error(`Verbindung fehlgeschlagen: ${err.message}`);
   }
 
   if (!code) {
-    throw new Error('Anmeldung fehlgeschlagen: Ungültige E-Mail oder Passwort. Bitte BMW ConnectedDrive-Zugangsdaten prüfen.');
+    throw new Error('Anmeldung fehlgeschlagen. Tipp: Stellen Sie sicher, dass Sie die myBMW App-Zugangsdaten (nicht ConnectedDrive Classic) verwenden.');
   }
 
-  // Step 2: Exchange code for tokens
+  // Step 3: Exchange code for tokens
   const tokenResp = await axios.post(
     tokenUrl,
     new URLSearchParams({
@@ -102,19 +137,12 @@ async function authenticateBMW(email, password, region = 'eu') {
       redirect_uri: REDIRECT_URI,
       grant_type: 'authorization_code',
       client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET
+      client_secret: CLIENT_SECRET,
     }).toString(),
-    {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'X-User-Agent': 'android(v1.7.0);bmw;1.7.0;row'
-      }
-    }
+    { headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' } }
   );
 
-  if (!tokenResp.data?.access_token) {
-    throw new Error('Token-Austausch fehlgeschlagen');
-  }
+  if (!tokenResp.data?.access_token) throw new Error('Token-Austausch fehlgeschlagen');
   return tokenResp.data;
 }
 
