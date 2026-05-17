@@ -1,178 +1,337 @@
 #!/usr/bin/env python3
-"""BMW Dashboard – Demo mode with realistic BEV data.
+"""BMW Dashboard – BMW CarData Official API (OAuth2 Device Code Flow)"""
 
-NOTE: BMW blocked all third-party API access in 2025. The bimmer_connected
-library itself warns: 'non-functional due to changes in the MyBMW API.'
-This server runs in Demo Mode with realistic sample data until BMW provides
-an official developer API or a working workaround becomes available.
-"""
-
+import asyncio
+import hashlib
+import json
 import secrets
-from datetime import datetime, timezone, timedelta
+import time
+from base64 import urlsafe_b64encode
+from threading import Thread
+
+import httpx
 from flask import Flask, jsonify, request, send_from_directory, session
 
 app = Flask(__name__, static_folder='public', static_url_path='')
 app.secret_key = secrets.token_hex(32)
 
-# ── Demo data ─────────────────────────────────────────────────────────────────
+CARDATA_API   = 'https://api-cardata.bmwgroup.com'
+OAUTH_BASE    = 'https://customer.bmwgroup.com/gcdm/oauth'
+SCOPE         = 'cardata:api:read openid offline_access'
 
-DEMO_VEHICLES = [
-    {
-        'vin': 'WBY1Z210X0V123456',
-        'attributes': {
-            'model': 'BMW iX xDrive50',
-            'modelName': 'BMW iX xDrive50',
-            'driveTrain': 'BEV',
-            'year': 2024,
-        }
-    }
-]
+# In-memory store: session_id -> token info
+_store: dict = {}
+# Pending device-code auth flows: device_code -> {client_id, verifier, expires, ...}
+_pending: dict = {}
 
-def make_demo_state():
-    now = datetime.now(timezone.utc)
+# ── PKCE helpers ──────────────────────────────────────────────────────────────
+
+def _pkce():
+    verifier = urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b'=').decode()
+    challenge = urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b'=').decode()
+    return verifier, challenge
+
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+
+def _headers(access_token):
     return {
-        'state': {
-            'currentMileage': 18742,
-            'electricChargingState': {
-                'chargingLevelPercent': 78,
-                'range': 312,
-                'chargingStatus': 'STANDBY',
-                'isChargerConnected': False,
-                'chargingTarget': 80,
-            },
-            'doorsState': {
-                'leftFront':  'CLOSED',
-                'rightFront': 'CLOSED',
-                'leftRear':   'CLOSED',
-                'rightRear':  'CLOSED',
-                'hood':       'CLOSED',
-                'trunk':      'CLOSED',
-            },
-            'windowsState': {'allClosed': True},
-            'location': {
-                'coordinates': {'latitude': 48.1351, 'longitude': 11.5820},
-                'address': {'formatted': 'Petuelring 130, 80809 München'}
-            },
-            'conditionBasedServices': [
-                {'cbsType': 'BRAKE_FLUID', 'description': 'Bremsflüssigkeit', 'state': 'OK',   'dueDate': '2026-08-01'},
-                {'cbsType': 'VEHICLE_CHECK', 'description': 'Fahrzeugcheck',  'state': 'OK',   'dueDate': '2026-03-15'},
-                {'cbsType': 'AIR_CONDITIONER', 'description': 'Klimaanlage',  'state': 'OK',   'dueDate': '2025-10-01'},
-            ],
-        }
+        'Authorization': f'Bearer {access_token}',
+        'Accept': 'application/json',
     }
 
-def make_demo_charging():
-    return {
-        'chargingState': {
-            'chargingLevelPercent': 78,
-            'isChargerConnected': False,
-            'chargingStatus': 'STANDBY',
-            'chargingTarget': 80,
-            'remainingChargingMinutes': None,
-            'chargingConnectionType': 'NONE',
-            'chargingPower': None,
-        }
-    }
+def _get_store():
+    sid = session.get('sid')
+    return _store.get(sid) if sid else None
 
-def make_demo_lasttrip():
-    return {
-        'lastTrip': {
-            'totalDistance': 43200,       # metres → 43.2 km
-            'totalDuration': 2520,        # seconds → 42 min
-            'totalEnergyConsumption': 16.8,
-            'totalRecuperatedEnergy': 3.2,
-        }
-    }
+def _require_auth():
+    s = _get_store()
+    if not s:
+        return jsonify({'error': 'Nicht angemeldet'}), 401
+    # Refresh token if expired
+    if s.get('expires_at', 0) < time.time() + 60:
+        try:
+            _refresh(s)
+        except Exception as e:
+            return jsonify({'error': f'Token abgelaufen: {e}'}), 401
+    return None
 
-def make_demo_alltime():
-    return {
-        'statistics': {
-            'totalDistance': 18742000,       # metres → 18 742 km
-            'totalElectricDistance': 18742000,
-            'totalEnergyCharged': 3840.5,
-            'totalRecuperatedEnergy': 620.3,
-        }
-    }
+def _refresh(store_entry):
+    client_id     = store_entry['client_id']
+    refresh_token = store_entry['refresh_token']
+    verifier      = store_entry['verifier']
+    r = httpx.post(f'{OAUTH_BASE}/token', data={
+        'grant_type':    'refresh_token',
+        'client_id':     client_id,
+        'refresh_token': refresh_token,
+        'code_verifier': verifier,
+    }, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    store_entry['access_token']  = data['access_token']
+    store_entry['expires_at']    = time.time() + data.get('expires_in', 3600)
+    if 'refresh_token' in data:
+        store_entry['refresh_token'] = data['refresh_token']
 
-def make_demo_sessions():
-    base = datetime.now(timezone.utc)
-    sessions = []
-    kwh_values = [28.4, 12.1, 44.7, 8.3, 36.2, 19.8, 52.1, 6.4, 41.3, 23.9]
-    for i, kwh in enumerate(kwh_values):
-        sessions.append({
-            'date': (base - timedelta(days=i * 3)).isoformat(),
-            'energyCharged': kwh,
-        })
-    return list(reversed(sessions))
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
+# ── Static ────────────────────────────────────────────────────────────────────
 
 @app.route('/')
 def index():
     return send_from_directory('public', 'index.html')
 
+# ── Auth flow ─────────────────────────────────────────────────────────────────
+
 @app.route('/api/status')
 def status():
-    return jsonify({'authenticated': session.get('demo', False)})
+    return jsonify({'authenticated': bool(_get_store())})
 
-@app.route('/api/login', methods=['POST'])
-def login():
-    # Demo mode: accept any credentials
-    session['demo'] = True
-    return jsonify({'success': True, 'demo': True})
+@app.route('/api/device-code', methods=['POST'])
+def device_code():
+    """Step 1: initiate Device Code flow — returns user_code + verification_uri."""
+    data = request.get_json() or {}
+    client_id = (data.get('client_id') or '').strip()
+    if not client_id:
+        return jsonify({'error': 'Bitte Client ID eingeben'}), 400
+
+    verifier, challenge = _pkce()
+    try:
+        r = httpx.post(f'{OAUTH_BASE}/device/code', data={
+            'client_id':             client_id,
+            'scope':                 SCOPE,
+            'code_challenge':        challenge,
+            'code_challenge_method': 'S256',
+        }, timeout=15)
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        return jsonify({'error': f'BMW CarData Fehler: {e.response.text[:200]}'}), 400
+    except Exception as e:
+        return jsonify({'error': f'Verbindungsfehler: {e}'}), 500
+
+    resp = r.json()
+    device_code_val = resp['device_code']
+    _pending[device_code_val] = {
+        'client_id':   client_id,
+        'verifier':    verifier,
+        'interval':    resp.get('interval', 5),
+        'expires':     time.time() + resp.get('expires_in', 600),
+    }
+
+    return jsonify({
+        'device_code':              device_code_val,
+        'user_code':                resp['user_code'],
+        'verification_uri':         resp.get('verification_uri', ''),
+        'verification_uri_complete': resp.get('verification_uri_complete', ''),
+        'expires_in':               resp.get('expires_in', 600),
+        'interval':                 resp.get('interval', 5),
+    })
+
+@app.route('/api/poll-token', methods=['POST'])
+def poll_token():
+    """Step 2: poll for token after user has authorized on BMW website."""
+    data        = request.get_json() or {}
+    device_code_val = data.get('device_code', '')
+    pending     = _pending.get(device_code_val)
+    if not pending:
+        return jsonify({'error': 'Unbekannter Device Code'}), 400
+    if time.time() > pending['expires']:
+        del _pending[device_code_val]
+        return jsonify({'error': 'Device Code abgelaufen, bitte neu starten'}), 400
+
+    try:
+        r = httpx.post(f'{OAUTH_BASE}/token', data={
+            'grant_type':    'urn:ietf:params:oauth:grant-type:device_code',
+            'client_id':     pending['client_id'],
+            'device_code':   device_code_val,
+            'code_verifier': pending['verifier'],
+        }, timeout=15)
+    except Exception as e:
+        return jsonify({'error': f'Verbindungsfehler: {e}'}), 500
+
+    if r.status_code == 400:
+        err = r.json().get('error', '')
+        if err == 'authorization_pending':
+            return jsonify({'status': 'pending'}), 202
+        if err == 'slow_down':
+            return jsonify({'status': 'slow_down'}), 202
+        return jsonify({'error': r.json().get('error_description', err)}), 400
+
+    try:
+        r.raise_for_status()
+    except Exception:
+        return jsonify({'error': r.text[:200]}), 400
+
+    token_data = r.json()
+    sid = secrets.token_hex(16)
+    _store[sid] = {
+        'client_id':     pending['client_id'],
+        'verifier':      pending['verifier'],
+        'access_token':  token_data['access_token'],
+        'refresh_token': token_data.get('refresh_token', ''),
+        'expires_at':    time.time() + token_data.get('expires_in', 3600),
+    }
+    session['sid'] = sid
+    del _pending[device_code_val]
+    return jsonify({'status': 'authorized'})
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
-    session.clear()
+    sid = session.pop('sid', None)
+    if sid:
+        _store.pop(sid, None)
     return jsonify({'success': True})
 
-# ── Data endpoints ────────────────────────────────────────────────────────────
-
-def require_auth():
-    if not session.get('demo'):
-        return jsonify({'error': 'Nicht angemeldet'}), 401
-    return None
+# ── CarData API endpoints ─────────────────────────────────────────────────────
 
 @app.route('/api/vehicles')
 def vehicles():
-    err = require_auth()
+    err = _require_auth()
     if err: return err
-    return jsonify(DEMO_VEHICLES)
+    store = _get_store()
+    try:
+        r = httpx.get(f'{CARDATA_API}/customers/vehicles/mappings',
+                      headers=_headers(store['access_token']), timeout=15)
+        r.raise_for_status()
+        mappings = r.json()
+        result = []
+        for v in (mappings if isinstance(mappings, list) else mappings.get('vehicles', [])):
+            vin = v.get('vin') or v.get('vehicleVin') or v.get('id', '')
+            result.append({
+                'vin': vin,
+                'attributes': {
+                    'model':     v.get('model') or v.get('modelName') or v.get('name', 'BMW'),
+                    'modelName': v.get('model') or v.get('modelName') or v.get('name', 'BMW'),
+                    'driveTrain': v.get('driveTrain', 'BEV'),
+                    'year': v.get('year') or v.get('modelYear'),
+                }
+            })
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/basic/<vin>')
+def basic_data(vin):
+    err = _require_auth()
+    if err: return err
+    store = _get_store()
+    try:
+        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/basicData',
+                      headers=_headers(store['access_token']), timeout=15)
+        r.raise_for_status()
+        return jsonify(r.json())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/state/<vin>')
 def vehicle_state(vin):
-    err = require_auth()
+    """Build state from CarData endpoints. Battery SoC via chargeHistory latest entry."""
+    err = _require_auth()
     if err: return err
-    return jsonify(make_demo_state())
+    store = _get_store()
+    headers = _headers(store['access_token'])
+    state = {}
+
+    # Basic data
+    try:
+        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/basicData',
+                      headers=headers, timeout=15)
+        if r.is_success:
+            bd = r.json()
+            state['currentMileage'] = bd.get('mileage') or bd.get('odometer')
+    except Exception:
+        pass
+
+    # Charge history → derive latest SoC and last charge
+    try:
+        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargeHistory',
+                      headers=headers, timeout=15)
+        if r.is_success:
+            history = r.json()
+            sessions = history if isinstance(history, list) else history.get('chargeHistory', [])
+            if sessions:
+                latest = sessions[-1]
+                soc = latest.get('socAfterCharging') or latest.get('stateOfCharge')
+                state['electricChargingState'] = {
+                    'chargingLevelPercent': soc,
+                    'chargingStatus': 'STANDBY',
+                    'isChargerConnected': False,
+                }
+    except Exception:
+        pass
+
+    # Tire data
+    try:
+        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/tireData',
+                      headers=headers, timeout=15)
+        if r.is_success:
+            state['tireData'] = r.json()
+    except Exception:
+        pass
+
+    return jsonify({'state': state})
 
 @app.route('/api/charging/<vin>')
 def charging(vin):
-    err = require_auth()
+    err = _require_auth()
     if err: return err
-    return jsonify(make_demo_charging())
-
-@app.route('/api/lasttrip')
-def last_trip():
-    err = require_auth()
-    if err: return err
-    return jsonify(make_demo_lasttrip())
-
-@app.route('/api/alltime')
-def alltime():
-    err = require_auth()
-    if err: return err
-    return jsonify(make_demo_alltime())
+    store = _get_store()
+    try:
+        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargeHistory',
+                      headers=_headers(store['access_token']), timeout=15)
+        r.raise_for_status()
+        history = r.json()
+        sessions = history if isinstance(history, list) else history.get('chargeHistory', [])
+        latest = sessions[-1] if sessions else {}
+        return jsonify({
+            'chargingState': {
+                'chargingLevelPercent':  latest.get('socAfterCharging') or latest.get('stateOfCharge'),
+                'isChargerConnected':    False,
+                'chargingStatus':        'STANDBY',
+                'chargingTarget':        latest.get('targetSoc'),
+                'remainingChargingMinutes': None,
+            }
+        })
+    except Exception as e:
+        return jsonify({'chargingState': {}, 'error': str(e)})
 
 @app.route('/api/sessions')
 def sessions_route():
-    err = require_auth()
+    # Use first vehicle from store if we have VIN
+    err = _require_auth()
     if err: return err
-    return jsonify(make_demo_sessions())
+    # VIN passed as query param from frontend
+    vin = request.args.get('vin', '')
+    if not vin:
+        return jsonify([])
+    store = _get_store()
+    try:
+        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargeHistory',
+                      headers=_headers(store['access_token']), timeout=15)
+        r.raise_for_status()
+        history = r.json()
+        sessions = history if isinstance(history, list) else history.get('chargeHistory', [])
+        result = []
+        for s in sessions[-10:]:
+            result.append({
+                'date':          s.get('startTime') or s.get('timestamp'),
+                'energyCharged': s.get('energyCharged') or s.get('chargedEnergy'),
+            })
+        return jsonify(result)
+    except Exception:
+        return jsonify([])
+
+@app.route('/api/lasttrip')
+def last_trip():
+    return jsonify({})
+
+@app.route('/api/alltime')
+def alltime():
+    return jsonify({})
 
 # ── Start ─────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    print('\n  BMW Dashboard (Demo-Modus) ▸  http://localhost:3001\n')
-    print('  HINWEIS: BMW hat die API für Drittanbieter gesperrt.')
-    print('  Das Dashboard läuft mit realistischen Beispieldaten.\n')
+    print('\n  BMW Dashboard ▸  http://localhost:3001\n')
+    print('  Verwendet BMW CarData Official API')
+    print('  Client ID nötig: https://bmw-cardata.bmwgroup.com\n')
     app.run(host='0.0.0.0', port=3001, debug=False)

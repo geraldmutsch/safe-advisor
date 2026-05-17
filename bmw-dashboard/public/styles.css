@@ -186,6 +186,105 @@ body {
   border-radius: 6px;
 }
 
+.cardata-hint {
+  background: rgba(1, 102, 177, 0.08);
+  border: 1px solid rgba(1, 102, 177, 0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+.cardata-hint a {
+  color: var(--bmw-light);
+  text-decoration: none;
+}
+
+.cardata-hint a:hover { text-decoration: underline; }
+
+.user-code-box {
+  background: var(--surface2);
+  border: 2px solid var(--bmw-blue);
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
+  margin-bottom: 16px;
+}
+
+.user-code-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+}
+
+.user-code {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: var(--text);
+  font-family: monospace;
+}
+
+.verification-uri {
+  display: block;
+  text-align: center;
+  background: rgba(1, 102, 177, 0.15);
+  border: 1px solid rgba(1, 102, 177, 0.4);
+  color: var(--bmw-light);
+  border-radius: 8px;
+  padding: 11px;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.2s;
+  word-break: break-all;
+}
+
+.verification-uri:hover { background: rgba(1, 102, 177, 0.3); }
+
+.polling-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 14px;
+  padding: 12px;
+  background: var(--surface2);
+  border-radius: 8px;
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--bmw-blue);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+.btn-secondary {
+  width: 100%;
+  background: none;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 11px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-secondary:hover { border-color: var(--red); color: var(--red); }
+
 .btn-primary {
   width: 100%;
   background: var(--bmw-blue);

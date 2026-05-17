@@ -1,42 +1,5 @@
 'use strict';
 
-// ── hCaptcha ───────────────────────────────────────────────────────────────
-// Site keys from bimmer_connected const.py
-const HCAPTCHA_KEYS = {
-  eu:  '10000000-ffff-ffff-ffff-000000000001', // test key — simple checkbox
-  row: '10000000-ffff-ffff-ffff-000000000001',
-  us:  'dc24de9a-9844-438b-b542-60067ff4dbe9',
-  cn:  '10000000-ffff-ffff-ffff-000000000001',
-};
-
-let hcaptchaWidgetId = null;
-
-function renderCaptcha(region) {
-  if (typeof hcaptcha === 'undefined') return;
-  const el = document.getElementById('hcaptcha-widget');
-  el.innerHTML = '';
-  hcaptchaWidgetId = hcaptcha.render(el, {
-    sitekey: HCAPTCHA_KEYS[region] || HCAPTCHA_KEYS.eu,
-    theme: 'dark',
-    callback: token => { document.getElementById('login-captcha').value = token; },
-    'expired-callback': () => { document.getElementById('login-captcha').value = ''; },
-  });
-}
-
-// Re-render widget when region changes
-window.addEventListener('DOMContentLoaded', () => {
-  const regionSel = document.getElementById('login-region');
-  if (regionSel) {
-    regionSel.addEventListener('change', () => renderCaptcha(regionSel.value));
-  }
-});
-
-// Called by hCaptcha JS SDK once loaded
-window.onloadCallback = () => {
-  const region = (document.getElementById('login-region') || {}).value || 'eu';
-  renderCaptcha(region);
-};
-
 // ── State ──────────────────────────────────────────────────────────────────
 const state = {
   vehicles: [],
@@ -52,6 +15,10 @@ const state = {
   sessionsChart: null,
   refreshTimer: null,
 };
+
+// Device Code Flow tracking
+let _deviceCode = null;
+let _pollTimer  = null;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -94,33 +61,99 @@ function getBatteryColor(pct) {
   return '#e74c3c';
 }
 
-// ── Login ──────────────────────────────────────────────────────────────────
+// ── Device Code Flow ───────────────────────────────────────────────────────
 $('login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const btn = $('login-btn');
+  const clientId = $('login-client-id').value.trim();
+  const btn   = $('login-btn');
   const errEl = $('login-error');
   errEl.style.display = 'none';
+
+  if (!clientId) {
+    errEl.textContent = 'Bitte Client ID eingeben';
+    errEl.style.display = 'block';
+    return;
+  }
+
   btn.disabled = true;
-  btn.textContent = 'Verbinde…';
+  btn.textContent = 'Bitte warten…';
 
   try {
-    await api('/api/login', { method: 'POST', body: JSON.stringify({}) });
-    await initDashboard();
+    const data = await api('/api/device-code', {
+      method: 'POST',
+      body: JSON.stringify({ client_id: clientId }),
+    });
+    _deviceCode = data.device_code;
+
+    // Show device code step
+    $('login-step1').style.display = 'none';
+    $('login-step2').style.display = 'block';
+    $('user-code-display').textContent = data.user_code;
+
+    const link = $('verification-link');
+    const uri  = data.verification_uri_complete || data.verification_uri || '#';
+    link.href        = uri;
+    link.textContent = 'BMW-Seite öffnen ↗';
+
+    $('polling-status').style.display  = 'flex';
+    $('login-error-2').style.display   = 'none';
+
+    _startPolling(data.interval || 5);
   } catch (err) {
     errEl.textContent = err.message;
     errEl.style.display = 'block';
     btn.disabled = false;
-    btn.textContent = 'Demo starten';
+    btn.textContent = 'Login starten';
   }
 });
 
+$('cancel-btn').addEventListener('click', () => {
+  _stopPolling();
+  $('login-step1').style.display = 'block';
+  $('login-step2').style.display = 'none';
+  $('login-btn').disabled = false;
+  $('login-btn').textContent = 'Login starten';
+});
+
+function _startPolling(intervalSecs) {
+  _stopPolling();
+  _pollTimer = setInterval(_doPoll, intervalSecs * 1000);
+}
+
+function _stopPolling() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+}
+
+async function _doPoll() {
+  try {
+    const result = await api('/api/poll-token', {
+      method: 'POST',
+      body: JSON.stringify({ device_code: _deviceCode }),
+    });
+    if (result.status === 'authorized') {
+      _stopPolling();
+      await initDashboard();
+    }
+    // 'pending' or 'slow_down' → keep waiting (202 does not throw)
+  } catch (err) {
+    _stopPolling();
+    $('polling-status').style.display = 'none';
+    const errEl = $('login-error-2');
+    errEl.textContent = err.message;
+    errEl.style.display = 'block';
+  }
+}
+
+// ── Logout ─────────────────────────────────────────────────────────────────
 $('logout-btn').addEventListener('click', async () => {
   await api('/api/logout', { method: 'POST' }).catch(() => {});
   clearInterval(state.refreshTimer);
-  $('dashboard').style.display = 'none';
+  $('dashboard').style.display    = 'none';
   $('login-screen').style.display = 'flex';
-  $('login-btn').disabled = false;
-  $('login-btn').textContent = 'Demo starten';
+  $('login-step1').style.display  = 'block';
+  $('login-step2').style.display  = 'none';
+  $('login-btn').disabled    = false;
+  $('login-btn').textContent = 'Login starten';
 });
 
 $('refresh-btn').addEventListener('click', () => refreshAll());
@@ -137,7 +170,7 @@ async function boot() {
 
 async function initDashboard() {
   $('login-screen').style.display = 'none';
-  $('dashboard').style.display = 'block';
+  $('dashboard').style.display    = 'block';
 
   initMap();
   initGauge();
@@ -153,7 +186,6 @@ async function initDashboard() {
 // ── Vehicles ───────────────────────────────────────────────────────────────
 async function loadVehicles() {
   const data = await api('/api/vehicles');
-  // API returns array or object with vehicles array
   state.vehicles = Array.isArray(data) ? data : (data.vehicles || [data]);
 
   const sel = $('vehicle-selector');
@@ -195,7 +227,7 @@ async function refreshAll() {
       api(`/api/charging/${state.selectedVin}`),
       api('/api/lasttrip'),
       api('/api/alltime'),
-      api('/api/sessions'),
+      api(`/api/sessions?vin=${state.selectedVin}`),
     ]);
 
     if (vstate.status === 'fulfilled') {
@@ -232,60 +264,53 @@ async function refreshAll() {
 function renderVehicleState(data) {
   const s = data.state || data;
 
-  // Mileage
   const mileage = s.currentMileage || s.mileage || s.odometer?.mileage;
   setText('v-mileage', mileage ? mileage.toLocaleString('de-DE') : '–');
 
-  // Electric charging state
-  const elec = s.electricChargingState || s.chargingState || {};
-  const pct = elec.chargingLevelPercent ?? elec.batteryChargingState?.chargeLevelPercent ?? null;
+  const elec  = s.electricChargingState || s.chargingState || {};
+  const pct   = elec.chargingLevelPercent ?? elec.batteryChargingState?.chargeLevelPercent ?? null;
   const range = elec.range ?? elec.remainingRange ?? s.range?.electricalRange;
 
   setText('v-range', range ?? '–');
 
-  // Vehicle status badge
   const isReady = s.isLeftSteering !== undefined || pct !== null;
   $('v-status').textContent = isReady ? 'Verbunden' : 'Offline';
-  $('v-status').className = 'badge ' + (isReady ? 'green' : '');
+  $('v-status').className   = 'badge ' + (isReady ? 'green' : '');
 
-  // Battery gauge
   if (pct !== null) {
     updateGauge(pct, range);
     setText('g-pct', pct);
     setText('g-range', `${range ?? '–'} km`);
     const chargingStatus = elec.chargingStatus || elec.status || '';
     setText('g-status-text', translateStatus(chargingStatus));
-    setText('g-target', (elec.chargingTarget ?? elec.chargeLevelTarget ?? 80));
+    setText('g-target', elec.chargingTarget ?? elec.chargeLevelTarget ?? 80);
   }
 
-  // Doors
-  const doors = s.doorsState || s.doors || {};
+  const doors   = s.doorsState || s.doors || {};
   const windows = s.windowsState || s.windows || {};
   renderDoors(doors, windows);
 
-  // Location
   const loc = s.location || s.gpsCoordinates;
   if (loc) {
-    const lat = loc.coordinates?.latitude ?? loc.latitude;
-    const lon = loc.coordinates?.longitude ?? loc.longitude;
-    const address = loc.address?.formatted ?? loc.formattedAddress;
+    const lat     = loc.coordinates?.latitude  ?? loc.latitude;
+    const lon     = loc.coordinates?.longitude ?? loc.longitude;
+    const address = loc.address?.formatted     ?? loc.formattedAddress;
     if (lat && lon) updateMap(lat, lon, address);
   }
 
-  // Service
   const svc = s.requiredServices || s.serviceMessages || s.checkControlMessages || [];
   renderService(s, svc);
 }
 
 function translateStatus(status) {
   const map = {
-    STANDBY: 'Bereit',
-    CHARGING: 'Lädt',
-    COMPLETE: 'Voll',
-    ERROR: 'Fehler',
-    FULLY_CHARGED: 'Voll',
-    WAITING_FOR_CHARGING: 'Warte…',
-    NOT_CHARGING: 'Nicht geladen',
+    STANDBY:                 'Bereit',
+    CHARGING:                'Lädt',
+    COMPLETE:                'Voll',
+    ERROR:                   'Fehler',
+    FULLY_CHARGED:           'Voll',
+    WAITING_FOR_CHARGING:    'Warte…',
+    NOT_CHARGING:            'Nicht geladen',
   };
   return map[status] || status || '–';
 }
@@ -312,7 +337,7 @@ function initGauge() {
   });
 }
 
-function updateGauge(pct, range) {
+function updateGauge(pct) {
   if (!state.gaugeChart) return;
   const color = getBatteryColor(pct);
   const ds = state.gaugeChart.data.datasets[0];
@@ -324,22 +349,23 @@ function updateGauge(pct, range) {
 
 // ── Charging ───────────────────────────────────────────────────────────────
 function renderCharging(data) {
-  const c = data.chargingState || data.state || data;
+  const c         = data.chargingState || data.state || data;
   const isPlugged = c.isChargerConnected ?? c.pluggedIn ?? false;
-  const status = c.chargingStatus || c.status || '';
+  const status    = c.chargingStatus || c.status || '';
   const isCharging = status === 'CHARGING' || status === 'FAST_CHARGING';
 
   const icon = $('plug-icon');
-  icon.className = 'charge-plug-icon ' + (isPlugged ? 'plugged' : 'unplugged');
+  icon.className   = 'charge-plug-icon ' + (isPlugged ? 'plugged' : 'unplugged');
   icon.textContent = isPlugged ? '⚡' : '🔌';
 
-  setText('charge-status-text', isCharging ? 'Wird geladen' : (isPlugged ? 'Stecker verbunden' : 'Nicht verbunden'));
+  setText('charge-status-text', isCharging
+    ? 'Wird geladen'
+    : (isPlugged ? 'Stecker verbunden' : 'Nicht verbunden'));
 
   const pct = c.chargingLevelPercent ?? c.batteryChargingState?.chargeLevelPercent ?? 0;
   $('charge-bar').style.width = `${pct}%`;
 
-  const chargingType = c.chargingConnectionType || c.connectionType || '–';
-  setText('c-type', translateChargingType(chargingType));
+  setText('c-type', translateChargingType(c.chargingConnectionType || c.connectionType || ''));
 
   const power = c.chargingRateInKilometersPerHour != null
     ? `${(c.chargingRateInKilometersPerHour / 6).toFixed(1)} kW`
@@ -361,25 +387,23 @@ function translateChargingType(type) {
 // ── Doors ─────────────────────────────────────────────────────────────────
 function renderDoors(doors, windows) {
   const items = [
-    { key: 'leftFront',  label: 'VL Tür',       icon: '🚗' },
-    { key: 'rightFront', label: 'VR Tür',       icon: '🚗' },
-    { key: 'leftRear',   label: 'HL Tür',       icon: '🚗' },
-    { key: 'rightRear',  label: 'HR Tür',       icon: '🚗' },
-    { key: 'hood',       label: 'Motorhaube',   icon: '🔧' },
-    { key: 'trunk',      label: 'Kofferraum',   icon: '📦' },
+    { key: 'leftFront',  label: 'VL Tür',     icon: '🚗' },
+    { key: 'rightFront', label: 'VR Tür',     icon: '🚗' },
+    { key: 'leftRear',   label: 'HL Tür',     icon: '🚗' },
+    { key: 'rightRear',  label: 'HR Tür',     icon: '🚗' },
+    { key: 'hood',       label: 'Motorhaube', icon: '🔧' },
+    { key: 'trunk',      label: 'Kofferraum', icon: '📦' },
   ];
 
   const grid = $('doors-grid');
   grid.innerHTML = items.map(({ key, label, icon }) => {
     const rawVal = doors[key] || doors[key.replace(/([A-Z])/g, '_$1').toLowerCase()];
     const isOpen = rawVal && rawVal !== 'CLOSED' && rawVal !== 'LOCKED';
-    const cls = isOpen ? 'open' : 'closed';
-    const statusText = isOpen ? 'Offen' : 'Geschlossen';
     return `
-      <div class="door-item ${cls}">
+      <div class="door-item ${isOpen ? 'open' : 'closed'}">
         <div class="door-icon">${icon}</div>
         <div class="door-name">${label}</div>
-        <div class="door-status">${statusText}</div>
+        <div class="door-status">${isOpen ? 'Offen' : 'Geschlossen'}</div>
       </div>`;
   }).join('');
 }
@@ -419,7 +443,6 @@ function updateMap(lat, lon, address) {
     setText('map-address', address);
     state.mapMarker.bindPopup(address);
   } else {
-    // Reverse geocode via Nominatim
     fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`)
       .then(r => r.json())
       .then(d => {
@@ -433,26 +456,26 @@ function updateMap(lat, lon, address) {
 
 // ── Last trip ──────────────────────────────────────────────────────────────
 function renderLastTrip(data) {
-  const t = data.lastTrip || data.trip || data;
+  const t    = data.lastTrip || data.trip || data;
   const dist = t.totalDistance ?? t.distance ?? t.tripDistance;
-  const dur = t.totalDuration ?? t.duration ?? t.tripDuration;
+  const dur  = t.totalDuration ?? t.duration ?? t.tripDuration;
   const cons = t.totalEnergyConsumption ?? t.electricConsumption ?? t.averageElectricConsumption;
   const reco = t.totalRecuperatedEnergy ?? t.recuperatedEnergy;
 
   setText('t-dist', dist != null ? (dist / 1000).toFixed(1) : '–');
-  setText('t-dur', dur != null ? Math.round(dur / 60) : '–');
-  setText('t-cons', cons != null ? cons.toFixed(1) : '–');
-  setText('t-reco', reco != null ? reco.toFixed(1) : '–');
+  setText('t-dur',  dur  != null ? Math.round(dur / 60)     : '–');
+  setText('t-cons', cons != null ? cons.toFixed(1)          : '–');
+  setText('t-reco', reco != null ? reco.toFixed(1)          : '–');
 }
 
 // ── All-time Stats ─────────────────────────────────────────────────────────
 function renderAlltimeStats(data) {
   const s = data.statistics || data.alltime || data;
   const items = [
-    { icon: '🛣️', value: fmt(s.totalDistance != null ? (s.totalDistance / 1000).toFixed(0) : null), unit: 'km', label: 'Gesamtstrecke' },
-    { icon: '⚡', value: fmt(s.totalElectricDistance != null ? (s.totalElectricDistance / 1000).toFixed(0) : null), unit: 'km', label: 'Elektrisch gefahren' },
-    { icon: '🔋', value: fmt(s.totalEnergyCharged != null ? s.totalEnergyCharged.toFixed(0) : null), unit: 'kWh', label: 'Geladen gesamt' },
-    { icon: '♻️', value: fmt(s.totalRecuperatedEnergy != null ? s.totalRecuperatedEnergy.toFixed(0) : null), unit: 'kWh', label: 'Rekuperiert gesamt' },
+    { icon: '🛣️', value: fmt(s.totalDistance         != null ? (s.totalDistance / 1000).toFixed(0)         : null), unit: 'km',  label: 'Gesamtstrecke' },
+    { icon: '⚡',  value: fmt(s.totalElectricDistance != null ? (s.totalElectricDistance / 1000).toFixed(0)  : null), unit: 'km',  label: 'Elektrisch gefahren' },
+    { icon: '🔋', value: fmt(s.totalEnergyCharged    != null ? s.totalEnergyCharged.toFixed(0)              : null), unit: 'kWh', label: 'Geladen gesamt' },
+    { icon: '♻️', value: fmt(s.totalRecuperatedEnergy != null ? s.totalRecuperatedEnergy.toFixed(0)         : null), unit: 'kWh', label: 'Rekuperiert gesamt' },
   ];
 
   $('alltime-grid').innerHTML = items.map(i => `
@@ -468,33 +491,27 @@ function renderAlltimeStats(data) {
 function renderService(vehicleState, svcMessages) {
   const rows = [];
 
-  // Condition Based Services
   const cbs = vehicleState.conditionBasedServices || vehicleState.cbsData || [];
   cbs.forEach(item => {
     const isOk = item.state === 'OK' || item.status === 'OK';
-    const cls = isOk ? 'ok' : 'warn';
-    const due = item.dueDate ? formatDate(item.dueDate) : (item.remainingMileage ? `${item.remainingMileage} km` : '–');
-    rows.push({ label: item.description || item.cbsType || 'Service', value: due, cls });
+    const due  = item.dueDate
+      ? formatDate(item.dueDate)
+      : (item.remainingMileage ? `${item.remainingMileage} km` : '–');
+    rows.push({ label: item.description || item.cbsType || 'Service', value: due, cls: isOk ? 'ok' : 'warn' });
   });
 
-  // Tires
   const tires = vehicleState.tireState || vehicleState.tires;
   if (tires) {
     const tirePressure = tires.frontLeft?.currentPressure || tires.pressure;
-    if (tirePressure) {
-      rows.push({ label: 'Reifendruck', value: `${tirePressure} bar`, cls: 'ok' });
-    }
+    if (tirePressure) rows.push({ label: 'Reifendruck', value: `${tirePressure} bar`, cls: 'ok' });
   }
 
-  // Check control messages
   svcMessages.forEach(m => {
     const isAlert = m.state === 'CRITICAL' || m.severity === 'CRITICAL';
     rows.push({ label: m.description || m.type, value: m.state || '!', cls: isAlert ? 'alert' : 'warn' });
   });
 
-  if (rows.length === 0) {
-    rows.push({ label: 'Kein Service erforderlich', value: 'OK', cls: 'ok' });
-  }
+  if (rows.length === 0) rows.push({ label: 'Kein Service erforderlich', value: 'OK', cls: 'ok' });
 
   $('service-rows').innerHTML = rows.map(r => `
     <div class="service-row">
@@ -531,19 +548,17 @@ function initSessionsChart() {
           bodyColor: '#e8edf2',
           borderColor: '#243548',
           borderWidth: 1,
-          callbacks: {
-            label: ctx => `${ctx.parsed.y.toFixed(1)} kWh`,
-          }
+          callbacks: { label: ctx => `${ctx.parsed.y.toFixed(1)} kWh` }
         }
       },
       scales: {
         x: {
           ticks: { color: '#7a90a8', font: { size: 11 } },
-          grid: { color: '#243548' },
+          grid:  { color: '#243548' },
         },
         y: {
           ticks: { color: '#7a90a8', font: { size: 11 }, callback: v => `${v} kWh` },
-          grid: { color: '#243548' },
+          grid:  { color: '#243548' },
           beginAtZero: true,
         }
       }
@@ -553,7 +568,7 @@ function initSessionsChart() {
 
 function renderSessionsChart(data) {
   const sessions = Array.isArray(data) ? data : (data.chargingSessions || data.sessions || []);
-  const last10 = sessions.slice(-10);
+  const last10   = sessions.slice(-10);
 
   if (last10.length === 0) {
     $('card-sessions').style.display = 'none';
@@ -565,12 +580,10 @@ function renderSessionsChart(data) {
     return date ? new Date(date).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' }) : '–';
   });
 
-  const values = last10.map(s =>
-    s.energyCharged ?? s.energy ?? s.totalEnergyCharged ?? 0
-  );
+  const values = last10.map(s => s.energyCharged ?? s.energy ?? s.totalEnergyCharged ?? 0);
 
-  state.sessionsChart.data.labels = labels;
-  state.sessionsChart.data.datasets[0].data = values;
+  state.sessionsChart.data.labels                  = labels;
+  state.sessionsChart.data.datasets[0].data        = values;
   state.sessionsChart.update();
 }
 
