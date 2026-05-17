@@ -24,11 +24,10 @@ const REGIONS = {
   row: { authHost: 'customer.bmwgroup.com',  apiHost: 'cocoapi.bmwgroup.com',  countryId: 'AU', languageId: 'en' }
 };
 
-// BMW ConnectedDrive OAuth2 client credentials (from bimmer_connected open-source project)
-const CLIENT_ID = 'dbf0a542-ebd1-4ff0-a9a7-55172fbfce35';
-const CLIENT_SECRET = '7f359ece-b4eb-42e7-8522-be2bc5060f57';
+// BMW ConnectedDrive OAuth2 — public PKCE client (no client_secret)
+const CLIENT_ID = '31c357a0-7a1d-4590-aa99-33b97244d048';
 const REDIRECT_URI = 'com.bmw.connected://oauth';
-const SCOPE = 'openid profile email offline_access smacc vehicle_data perseus dlm tsc svds remote_services fupo';
+const SCOPE = 'openid profile email offline_access smacc vehicle_data remote_services';
 
 function generatePKCE() {
   const verifier = crypto.randomBytes(32).toString('base64url');
@@ -128,7 +127,7 @@ async function authenticateBMW(email, password, region = 'eu') {
     throw new Error('Anmeldung fehlgeschlagen. Tipp: Stellen Sie sicher, dass Sie die myBMW App-Zugangsdaten (nicht ConnectedDrive Classic) verwenden.');
   }
 
-  // Step 3: Exchange code for tokens
+  // Step 3: Exchange code for tokens (public PKCE client — no client_secret)
   const tokenResp = await axios.post(
     tokenUrl,
     new URLSearchParams({
@@ -137,7 +136,6 @@ async function authenticateBMW(email, password, region = 'eu') {
       redirect_uri: REDIRECT_URI,
       grant_type: 'authorization_code',
       client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
     }).toString(),
     { headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' } }
   );
@@ -155,7 +153,6 @@ async function refreshBMWToken(refreshToken, region = 'eu') {
       grant_type: 'refresh_token',
       refresh_token: refreshToken,
       client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET
     }).toString(),
     { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
   );
