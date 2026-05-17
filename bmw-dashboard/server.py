@@ -58,15 +58,19 @@ def login():
     from bimmer_connected.api.regions import get_region_from_name
 
     data = request.get_json() or {}
-    email    = (data.get('email') or '').strip()
-    password = data.get('password') or ''
-    region   = REGION_MAP.get(data.get('region', 'eu'), 'rest_of_world')
+    email         = (data.get('email') or '').strip()
+    password      = data.get('password') or ''
+    region        = REGION_MAP.get(data.get('region', 'eu'), 'rest_of_world')
+    captcha_token = data.get('captcha_token') or ''
 
     if not email or not password:
         return jsonify({'error': 'E-Mail und Passwort erforderlich'}), 400
+    if not captcha_token:
+        return jsonify({'error': 'Captcha-Token fehlt. Bitte Captcha auf der verlinkten Seite lösen.'}), 400
 
     try:
-        account = MyBMWAccount(email, password, get_region_from_name(region))
+        account = MyBMWAccount(email, password, get_region_from_name(region),
+                               hcaptcha_token=captcha_token)
         arun(account.get_vehicles())
 
         sid = secrets.token_hex(16)

@@ -67,12 +67,21 @@ $('login-form').addEventListener('submit', async (e) => {
   btn.textContent = 'Verbinde…';
 
   try {
+    const captcha = $('login-captcha').value.trim();
+    if (!captcha) {
+      errEl.textContent = 'Bitte zuerst das Captcha lösen und den Token einfügen.';
+      errEl.style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = 'Anmelden';
+      return;
+    }
     await api('/api/login', {
       method: 'POST',
       body: JSON.stringify({
         email: $('login-email').value.trim(),
         password: $('login-password').value,
         region: $('login-region').value,
+        captcha_token: captcha,
       }),
     });
     await initDashboard();

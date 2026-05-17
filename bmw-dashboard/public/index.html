@@ -45,6 +45,23 @@
           <option value="row">Rest der Welt (ROW)</option>
         </select>
       </div>
+      <div class="captcha-box">
+        <div class="captcha-step">
+          <span class="captcha-num">1</span>
+          <div>
+            <div style="font-size:13px;font-weight:600;margin-bottom:4px">Captcha lösen</div>
+            <div style="font-size:12px;color:var(--muted)">BMW verlangt eine Captcha-Bestätigung.</div>
+          </div>
+        </div>
+        <a href="https://bimmer-connected.readthedocs.io/en/stable/captcha.html" target="_blank" class="btn-captcha">
+          Captcha-Seite öffnen ↗
+        </a>
+        <div class="captcha-step" style="margin-top:10px">
+          <span class="captcha-num">2</span>
+          <div style="font-size:13px;font-weight:600">Token hier einfügen</div>
+        </div>
+        <input type="text" id="login-captcha" placeholder="hCaptcha-Token einfügen…" autocomplete="off" />
+      </div>
       <button type="submit" class="btn-primary" id="login-btn">Anmelden</button>
       <div class="error-msg" id="login-error"></div>
     </form>

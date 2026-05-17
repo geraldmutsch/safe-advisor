@@ -122,6 +122,66 @@ body {
   background: var(--surface2);
 }
 
+.captcha-box {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.captcha-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.captcha-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--bmw-blue);
+  color: white;
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.btn-captcha {
+  display: block;
+  text-align: center;
+  background: rgba(1, 102, 177, 0.15);
+  border: 1px solid rgba(1, 102, 177, 0.4);
+  color: var(--bmw-light);
+  border-radius: 7px;
+  padding: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.2s;
+}
+
+.btn-captcha:hover { background: rgba(1, 102, 177, 0.3); }
+
+#login-captcha {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 9px 12px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: monospace;
+  outline: none;
+  margin-top: 8px;
+}
+
+#login-captcha:focus { border-color: var(--bmw-blue); }
+
 .btn-primary {
   width: 100%;
   background: var(--bmw-blue);
