@@ -80,6 +80,8 @@ def login():
 
     except Exception as e:
         msg = str(e)
+        if 'locked' in msg.lower() or 'blocked' in msg.lower():
+            return jsonify({'error': 'IP/Konto vorübergehend gesperrt. Bitte 30–60 Minuten warten und erneut versuchen. (Zu viele fehlgeschlagene Login-Versuche)'}), 429
         if any(k in msg.lower() for k in ('credential', '401', 'password', 'login', 'invalid')):
             return jsonify({'error': f'Zugangsdaten falsch: {msg}'}), 401
         return jsonify({'error': f'Verbindungsfehler: {msg}'}), 500
