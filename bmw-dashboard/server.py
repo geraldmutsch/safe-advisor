@@ -20,6 +20,20 @@ SCOPE         = 'authenticate_user openid cardata:api:read cardata:streaming:rea
 _store: dict = {}
 # Pending device-code auth flows: device_code -> {client_id, verifier, expires, ...}
 _pending: dict = {}
+# Response cache: vin -> {endpoint -> {data, expires}}
+_cache: dict = {}
+CACHE_TTL = 1800  # 30 minutes
+
+def _cached(vin, key, fetch_fn):
+    """Return cached value or call fetch_fn() and cache the result for 30 min."""
+    now = time.time()
+    bucket = _cache.setdefault(vin, {})
+    entry  = bucket.get(key)
+    if entry and entry['expires'] > now:
+        return entry['data']
+    data = fetch_fn()
+    bucket[key] = {'data': data, 'expires': now + CACHE_TTL}
+    return data
 
 # ── Telematics key → structured state ────────────────────────────────────────
 
@@ -300,7 +314,8 @@ def vehicles():
     err = _require_auth()
     if err: return err
     store = _get_store()
-    try:
+
+    def fetch():
         r = httpx.get(f'{CARDATA_API}/customers/vehicles/mappings',
                       headers=_headers(store['access_token']), timeout=15)
         r.raise_for_status()
@@ -311,13 +326,16 @@ def vehicles():
             result.append({
                 'vin': vin,
                 'attributes': {
-                    'model':     v.get('model') or v.get('modelName') or v.get('name', 'BMW'),
-                    'modelName': v.get('model') or v.get('modelName') or v.get('name', 'BMW'),
+                    'model':      v.get('model') or v.get('modelName') or v.get('name', 'BMW'),
+                    'modelName':  v.get('model') or v.get('modelName') or v.get('name', 'BMW'),
                     'driveTrain': v.get('driveTrain', 'BEV'),
-                    'year': v.get('year') or v.get('modelYear'),
+                    'year':       v.get('year') or v.get('modelYear'),
                 }
             })
-        return jsonify(result)
+        return result
+
+    try:
+        return jsonify(_cached('_vehicles', 'mappings', fetch))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -339,78 +357,74 @@ def vehicle_state(vin):
     err = _require_auth()
     if err: return err
     store = _get_store()
-    headers = _headers(store['access_token'])
-    state = {}
 
-    # Basic data (mileage, model info)
-    try:
-        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/basicData',
-                      headers=headers, timeout=15)
-        if r.is_success:
-            bd = r.json()
-            state['currentMileage'] = bd.get('mileage') or bd.get('currentMileage') or bd.get('odometer')
-    except Exception:
-        pass
+    def fetch():
+        h     = _headers(store['access_token'])
+        state = {}
+        try:
+            r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/basicData', headers=h, timeout=15)
+            if r.is_success:
+                bd = r.json()
+                state['currentMileage'] = bd.get('mileage') or bd.get('currentMileage') or bd.get('odometer')
+        except Exception:
+            pass
+        try:
+            cid    = _ensure_container(store)
+            params = {'containerId': cid} if cid else {}
+            r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/telematicData',
+                          headers=h, params=params, timeout=15)
+            if r.is_success:
+                state.update(_telematics_to_state(_parse_telematics(r.json())))
+        except Exception:
+            pass
+        return {'state': state}
 
-    # Telematics data → SoC, range, location, doors
-    try:
-        container_id = _ensure_container(store)
-        params = {'containerId': container_id} if container_id else {}
-        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/telematicData',
-                      headers=headers, params=params, timeout=15)
-        if r.is_success:
-            td = _telematics_to_state(_parse_telematics(r.json()))
-            state.update(td)
-    except Exception:
-        pass
-
-    # Tire data
-    try:
-        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/tireData',
-                      headers=headers, timeout=15)
-        if r.is_success:
-            state['tireData'] = r.json()
-    except Exception:
-        pass
-
-    return jsonify({'state': state})
+    return jsonify(_cached(vin, 'state', fetch))
 
 @app.route('/api/charging/<vin>')
 def charging(vin):
     err = _require_auth()
     if err: return err
     store = _get_store()
-    # Try telematicData first, fall back to chargingHistory
-    try:
-        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/telematicData',
-                      headers=_headers(store['access_token']), timeout=15)
-        if r.is_success:
-            td = r.json()
-            elec = td.get('electricChargingState') or td.get('chargingState') or {}
-            return jsonify({'chargingState': elec})
-    except Exception:
-        pass
-    try:
-        now   = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-        since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 365*86400))
-        r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargingHistory',
-                      headers=_headers(store['access_token']),
-                      params={'from': since, 'to': now}, timeout=15)
-        if r.is_success:
-            history  = r.json()
-            sessions = history if isinstance(history, list) else history.get('chargingHistory', [])
-            latest   = sessions[-1] if sessions else {}
-            return jsonify({
-                'chargingState': {
-                    'chargingLevelPercent': latest.get('socAfterCharging') or latest.get('stateOfCharge'),
-                    'isChargerConnected':   False,
-                    'chargingStatus':       'STANDBY',
-                    'chargingTarget':       latest.get('targetSoc'),
+
+    def fetch():
+        h = _headers(store['access_token'])
+        # Try telematicData first (has live charging state)
+        try:
+            cid    = _ensure_container(store)
+            params = {'containerId': cid} if cid else {}
+            r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/telematicData',
+                          headers=h, params=params, timeout=15)
+            if r.is_success:
+                td = _parse_telematics(r.json())
+                elec = _telematics_to_state(td).get('electricChargingState', {})
+                if elec:
+                    return {'chargingState': elec}
+        except Exception:
+            pass
+        # Fall back to chargingHistory
+        try:
+            now   = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+            since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 365*86400))
+            r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargingHistory',
+                          headers=h, params={'from': since, 'to': now}, timeout=15)
+            if r.is_success:
+                history  = r.json()
+                sessions = history if isinstance(history, list) else history.get('chargingHistory', [])
+                latest   = sessions[-1] if sessions else {}
+                return {
+                    'chargingState': {
+                        'chargingLevelPercent': latest.get('socAfterCharging') or latest.get('stateOfCharge'),
+                        'isChargerConnected':   False,
+                        'chargingStatus':       'STANDBY',
+                        'chargingTarget':       latest.get('targetSoc'),
+                    }
                 }
-            })
-    except Exception:
-        pass
-    return jsonify({'chargingState': {}})
+        except Exception:
+            pass
+        return {'chargingState': {}}
+
+    return jsonify(_cached(vin, 'charging', fetch))
 
 @app.route('/api/sessions')
 def sessions_route():
@@ -420,7 +434,8 @@ def sessions_route():
     if not vin:
         return jsonify([])
     store = _get_store()
-    try:
+
+    def fetch():
         now   = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 365*86400))
         r = httpx.get(f'{CARDATA_API}/customers/vehicles/{vin}/chargingHistory',
@@ -429,13 +444,16 @@ def sessions_route():
         r.raise_for_status()
         history  = r.json()
         sessions = history if isinstance(history, list) else history.get('chargingHistory', [])
-        result   = []
-        for s in sessions[-10:]:
-            result.append({
+        return [
+            {
                 'date':          s.get('startTime') or s.get('timestamp'),
                 'energyCharged': s.get('energyCharged') or s.get('chargedEnergy'),
-            })
-        return jsonify(result)
+            }
+            for s in sessions[-10:]
+        ]
+
+    try:
+        return jsonify(_cached(vin, 'sessions', fetch))
     except Exception:
         return jsonify([])
 

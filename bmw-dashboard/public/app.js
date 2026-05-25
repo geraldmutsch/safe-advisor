@@ -180,7 +180,7 @@ async function initDashboard() {
   await refreshAll();
 
   clearInterval(state.refreshTimer);
-  state.refreshTimer = setInterval(refreshAll, 5 * 60 * 1000);
+  state.refreshTimer = setInterval(refreshAll, 30 * 60 * 1000);
 }
 
 // ── Vehicles ───────────────────────────────────────────────────────────────
