@@ -158,19 +158,24 @@ def _ensure_container(store_entry):
     h = {**_headers(store_entry['access_token']), 'Content-Type': 'application/json'}
     r = httpx.post(f'{CARDATA_API}/customers/containers',
                    headers=h,
-                   json={'technicalDescriptors': _DESCRIPTORS},
+                   json={
+                       'name':                 'BMW Dashboard',
+                       'purpose':              'Personal vehicle monitoring dashboard',
+                       'technicalDescriptors': _DESCRIPTORS,
+                   },
                    timeout=15)
     if r.is_success:
-        cid = r.json().get('containerId') or r.json().get('id')
+        body = r.json()
+        cid  = body.get('containerId') or body.get('id')
         store_entry['container_id'] = cid
         return cid
-    # If container already exists, try to fetch existing ones
-    if r.status_code in (409, 400):
+    # Container may already exist — fetch the list
+    if r.status_code in (400, 409):
         r2 = httpx.get(f'{CARDATA_API}/customers/containers',
                        headers=_headers(store_entry['access_token']), timeout=15)
         if r2.is_success:
-            containers = r2.json()
-            items = containers if isinstance(containers, list) else containers.get('containers', [])
+            items = r2.json()
+            items = items if isinstance(items, list) else items.get('containers', [])
             if items:
                 cid = items[0].get('containerId') or items[0].get('id')
                 store_entry['container_id'] = cid
@@ -443,29 +448,23 @@ def container_debug():
     h  = {**_headers(store['access_token']), 'Content-Type': 'application/json'}
     out = {}
     # Try different payload formats
-    payloads = {
-        'technicalDescriptors_list': {
-            'technicalDescriptors': _DESCRIPTORS[:3]
-        },
-        'descriptors_list': {
-            'descriptors': _DESCRIPTORS[:3]
-        },
-        'technicalDescriptors_objects': {
-            'technicalDescriptors': [{'name': d} for d in _DESCRIPTORS[:3]]
-        },
-        'single_descriptor': {
-            'technicalDescriptors': ['vehicle.powertrain.electric.battery.stateOfCharge']
-        },
-    }
-    for label, payload in payloads.items():
-        try:
-            r = httpx.post(f'{CARDATA_API}/customers/containers',
-                           headers=h, json=payload, timeout=15)
-            out[label] = {'status': r.status_code, 'body': r.text[:400]}
-            if r.is_success:
-                break  # stop on first success
-        except Exception as e:
-            out[label] = {'error': str(e)}
+    # Try correct payload (name + purpose + technicalDescriptors)
+    try:
+        r = httpx.post(f'{CARDATA_API}/customers/containers', headers=h,
+                       json={'name': 'BMW Dashboard',
+                             'purpose': 'Personal vehicle monitoring dashboard',
+                             'technicalDescriptors': _DESCRIPTORS},
+                       timeout=15)
+        out['create'] = {'status': r.status_code, 'body': r.text[:600]}
+    except Exception as e:
+        out['create'] = {'error': str(e)}
+    # List existing containers
+    try:
+        r = httpx.get(f'{CARDATA_API}/customers/containers',
+                      headers=_headers(store['access_token']), timeout=15)
+        out['list'] = {'status': r.status_code, 'body': r.text[:600]}
+    except Exception as e:
+        out['list'] = {'error': str(e)}
     return jsonify(out)
 
 @app.route('/api/raw/<vin>')
