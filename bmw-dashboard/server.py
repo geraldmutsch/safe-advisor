@@ -434,6 +434,31 @@ def sessions_route():
     except Exception:
         return jsonify([])
 
+@app.route('/api/container-debug')
+def container_debug():
+    """Debug: show container creation/listing responses."""
+    err = _require_auth()
+    if err: return err
+    store = _get_store()
+    h  = {**_headers(store['access_token']), 'Content-Type': 'application/json'}
+    h2 = _headers(store['access_token'])
+    out = {}
+    # Try POST create
+    try:
+        r = httpx.post(f'{CARDATA_API}/customers/containers',
+                       headers=h, json={'technicalDescriptors': _DESCRIPTORS}, timeout=15)
+        out['create'] = {'status': r.status_code, 'body': r.text[:600]}
+    except Exception as e:
+        out['create'] = {'error': str(e)}
+    # Try GET list (both paths)
+    for path in ['/customers/containers', '/customer/containers']:
+        try:
+            r = httpx.get(f'{CARDATA_API}{path}', headers=h2, timeout=15)
+            out[f'list{path}'] = {'status': r.status_code, 'body': r.text[:600]}
+        except Exception as e:
+            out[f'list{path}'] = {'error': str(e)}
+    return jsonify(out)
+
 @app.route('/api/raw/<vin>')
 def raw_data(vin):
     """Debug: returns raw BMW API responses for all endpoints."""
