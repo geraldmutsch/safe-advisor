@@ -436,27 +436,36 @@ def sessions_route():
 
 @app.route('/api/container-debug')
 def container_debug():
-    """Debug: show container creation/listing responses."""
+    """Debug: try different container creation payloads."""
     err = _require_auth()
     if err: return err
     store = _get_store()
     h  = {**_headers(store['access_token']), 'Content-Type': 'application/json'}
-    h2 = _headers(store['access_token'])
     out = {}
-    # Try POST create
-    try:
-        r = httpx.post(f'{CARDATA_API}/customers/containers',
-                       headers=h, json={'technicalDescriptors': _DESCRIPTORS}, timeout=15)
-        out['create'] = {'status': r.status_code, 'body': r.text[:600]}
-    except Exception as e:
-        out['create'] = {'error': str(e)}
-    # Try GET list (both paths)
-    for path in ['/customers/containers', '/customer/containers']:
+    # Try different payload formats
+    payloads = {
+        'technicalDescriptors_list': {
+            'technicalDescriptors': _DESCRIPTORS[:3]
+        },
+        'descriptors_list': {
+            'descriptors': _DESCRIPTORS[:3]
+        },
+        'technicalDescriptors_objects': {
+            'technicalDescriptors': [{'name': d} for d in _DESCRIPTORS[:3]]
+        },
+        'single_descriptor': {
+            'technicalDescriptors': ['vehicle.powertrain.electric.battery.stateOfCharge']
+        },
+    }
+    for label, payload in payloads.items():
         try:
-            r = httpx.get(f'{CARDATA_API}{path}', headers=h2, timeout=15)
-            out[f'list{path}'] = {'status': r.status_code, 'body': r.text[:600]}
+            r = httpx.post(f'{CARDATA_API}/customers/containers',
+                           headers=h, json=payload, timeout=15)
+            out[label] = {'status': r.status_code, 'body': r.text[:400]}
+            if r.is_success:
+                break  # stop on first success
         except Exception as e:
-            out[f'list{path}'] = {'error': str(e)}
+            out[label] = {'error': str(e)}
     return jsonify(out)
 
 @app.route('/api/raw/<vin>')
